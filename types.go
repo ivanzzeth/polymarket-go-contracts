@@ -1,4 +1,4 @@
-package polymarket
+package polymarketcontracts
 
 type SafeOperation uint8
 

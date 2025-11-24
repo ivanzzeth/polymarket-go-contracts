@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"log"
 	"math/big"
 	"os"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ivanzzeth/ethsig"
-	polymarket "github.com/ivanzzeth/polymarket-go-contracts"
+	polymarketcontracts "github.com/ivanzzeth/polymarket-go-contracts"
+	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
 
 func main() {
@@ -19,6 +20,10 @@ func main() {
 	client, err := ethclient.Dial(os.Getenv("RPC_URL"))
 	if err != nil {
 		log.Fatalf("Failed to dial ethclient with rpc %v: %v", os.Getenv("RPC_URL"), err)
+	}
+	chainID, err := client.ChainID(context.Background())
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	// Parse private key from environment
@@ -32,30 +37,23 @@ func main() {
 	address := crypto.PubkeyToAddress(privateKey.PublicKey)
 	log.Printf("Deployer Address: %s", address.Hex())
 
+	privateKeySigner, err := signer.NewSafeTradingPrivateKeySigner(chainID, client, privateKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Initialize V2 contract interface
-	config := polymarket.GetContractConfig(polygonChainID)
-	polymarketInterface, err := polymarket.NewContractInterface(client, config)
+	config := polymarketcontracts.GetContractConfig(polygonChainID)
+	polymarketInterface, err := polymarketcontracts.NewContractInterface(client, polymarketcontracts.WithContractConfig(config), polymarketcontracts.WithSafeSigner(privateKeySigner))
 	if err != nil {
 		log.Fatalf("Failed to create contract interface V2: %v", err)
-	}
-
-	// Create signer (EthPrivateKeySigner implements both TypedDataSigner and TransactionSigner)
-	ethSigner, err := ethsig.NewEthPrivateKeySignerFromPrivateKeyHex(privateKeyHex)
-	if err != nil {
-		log.Fatalf("Failed to create signer: %v", err)
-	}
-
-	// Get TransactionSender using the EthPrivateKeySigner as TransactionSigner
-	txSender, err := polymarketInterface.GetTransactionSenderrByTransactionSigner(client, ethSigner)
-	if err != nil {
-		log.Fatalf("Failed to create transaction sender: %v", err)
 	}
 
 	log.Printf("Safe Factory Address: %s", config.SafeProxyFactory.Hex())
 
 	// Deploy Safe contract using V2
 	log.Println("Deploying Safe contract...")
-	safeProxy, txHash, err := polymarketInterface.DeploySafe(txSender, ethSigner)
+	safeProxy, txHash, err := polymarketInterface.DeploySafe()
 	if err != nil {
 		log.Fatalf("Failed to deploy Safe: %v", err)
 	}

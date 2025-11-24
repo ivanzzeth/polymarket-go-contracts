@@ -8,7 +8,7 @@ import (
 	coboWaas2 "github.com/CoboGlobal/cobo-waas2-go-sdk/cobo_waas2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-	polymarket "github.com/ivanzzeth/polymarket-go-contracts"
+	polymarketcontracts "github.com/ivanzzeth/polymarket-go-contracts"
 	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
 
@@ -48,13 +48,6 @@ func main() {
 	address := common.HexToAddress(coboAddress)
 	log.Printf("Deployer Address (MPC): %s", address.Hex())
 
-	// Initialize V2 contract interface
-	config := polymarket.GetContractConfig(polygonChainID)
-	polymarketInterface, err := polymarket.NewContractInterface(client, config)
-	if err != nil {
-		log.Fatalf("Failed to create contract interface V2: %v", err)
-	}
-
 	// Create Cobo MPC signer
 	coboMpcSigner, err := signer.NewCoboMpcSigner(
 		coboEnv,
@@ -68,17 +61,24 @@ func main() {
 		log.Fatalf("Failed to create Cobo MPC signer: %v", err)
 	}
 
-	// Get TransactionSender for MPC
-	txSender, err := polymarketInterface.GetTransactionSenderrByCoboMpcTransactionSender(coboMpcSigner)
+	// Create Safe trading signer
+	mpcSafeSigner, err := signer.NewSafeTradingSingleMpcSigner(polygonChainID, client, coboMpcSigner)
 	if err != nil {
-		log.Fatalf("Failed to create MPC transaction sender: %v", err)
+		log.Fatalf("Failed to create MPC safe signer: %v", err)
+	}
+
+	// Initialize contract interface
+	config := polymarketcontracts.GetContractConfig(polygonChainID)
+	polymarketInterface, err := polymarketcontracts.NewContractInterface(client, polymarketcontracts.WithContractConfig(config), polymarketcontracts.WithSafeSigner(mpcSafeSigner))
+	if err != nil {
+		log.Fatalf("Failed to create contract interface: %v", err)
 	}
 
 	log.Printf("Safe Factory Address: %s", config.SafeProxyFactory.Hex())
 
 	// Deploy Safe contract using MPC
 	log.Println("Deploying Safe contract via Cobo MPC...")
-	safeProxy, txHash, err := polymarketInterface.DeploySafe(txSender, coboMpcSigner)
+	safeProxy, txHash, err := polymarketInterface.DeploySafe()
 	if err != nil {
 		log.Fatalf("Failed to deploy Safe: %v", err)
 	}

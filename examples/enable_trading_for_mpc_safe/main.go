@@ -9,7 +9,7 @@ import (
 	coboWaas2 "github.com/CoboGlobal/cobo-waas2-go-sdk/cobo_waas2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
-	polymarket "github.com/ivanzzeth/polymarket-go-contracts"
+	polymarketcontracts "github.com/ivanzzeth/polymarket-go-contracts"
 	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
 
@@ -49,14 +49,6 @@ func main() {
 	address := common.HexToAddress(coboAddress)
 	log.Printf("MPC EOA Address: %s", address.Hex())
 
-	// Initialize V2 contract interface
-	config := polymarket.GetContractConfig(polygonChainID)
-
-	polymarketInterfaceV2, err := polymarket.NewContractInterface(client, config)
-	if err != nil {
-		log.Fatalf("Failed to create contract interface V2: %v", err)
-	}
-
 	// Create Cobo MPC signer
 	coboMpcSigner, err := signer.NewCoboMpcSigner(
 		coboEnv,
@@ -75,8 +67,15 @@ func main() {
 		log.Fatalf("Failed to create Cobo MPC safe signer: %v", err)
 	}
 
+	// Initialize contract interface
+	config := polymarketcontracts.GetContractConfig(polygonChainID)
+	polymarketInterface, err := polymarketcontracts.NewContractInterface(client, polymarketcontracts.WithContractConfig(config), polymarketcontracts.WithSafeSigner(mpcSafeSigner))
+	if err != nil {
+		log.Fatalf("Failed to create contract interface: %v", err)
+	}
+
 	// Calculate Safe address
-	safeAddr, err := polymarketInterfaceV2.GetSafeAddress(address)
+	safeAddr, err := polymarketInterface.GetSafeAddress(address)
 	if err != nil {
 		log.Fatalf("Failed to get Safe address: %v", err)
 	}
@@ -107,8 +106,7 @@ func main() {
 	log.Println("This will set up all required allowances for trading on Polymarket")
 	log.Println()
 
-	err = polymarketInterfaceV2.EnableTradingForSafe(ctx, mpcSafeSigner, polygonChainID, safeAddr)
-	// err = polymarketInterface.EnableTradingForSafe(ctx, txSender, coboMpcSigner, polygonChainID, safeAddr)
+	txHashes, err := polymarketInterface.EnableTrading(ctx)
 	if err != nil {
 		log.Fatalf("Failed to enable trading: %v", err)
 	}
@@ -123,6 +121,12 @@ func main() {
 	log.Println("   ✅ CTF approved for Exchange contract")
 	log.Println("   ✅ CTF approved for NegRiskAdapter contract")
 	log.Println("   ✅ CTF approved for NegRiskExchange contract")
+	log.Println()
+	log.Printf("📝 Transaction hashes:")
+	for i, txHash := range txHashes {
+		log.Printf("   %d. %s", i+1, txHash.Hex())
+		log.Printf("      View on Polygonscan: https://polygonscan.com/tx/%s", txHash.Hex())
+	}
 	log.Println()
 	log.Println("🚀 Next steps:")
 	log.Println("   1. Fund your Safe with USDC for trading")

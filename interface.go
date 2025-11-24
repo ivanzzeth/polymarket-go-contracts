@@ -1,4 +1,4 @@
-package polymarket
+package polymarketcontracts
 
 import (
 	"context"
@@ -45,6 +45,7 @@ type ContractInterface struct {
 	client            ethclient.EthClientInterface
 	contractConfig    *ContractConfig
 	signatureType     SignatureType
+	eoaTradingSigner  signer.EOATradingSigner
 	safeTradingSigner signer.SafeTradingSigner
 	txSender          sender.TransactionSender
 
@@ -62,15 +63,41 @@ type ContractInterface struct {
 }
 
 type ContractInterfaceConfig struct {
-	// TODO: Support EOA
-	SignatureType     SignatureType // NOTE: Could ONLY support Safe right now.
+	SignatureType     SignatureType
 	TxSender          sender.TransactionSender
+	EOATradingSigner  signer.EOATradingSigner
 	SafeTradingSigner signer.SafeTradingSigner
 
 	ContractConfig *ContractConfig
 }
 
 type ContractInterfaceOption func(c *ContractInterfaceConfig)
+
+func WithContractConfig(cc *ContractConfig) ContractInterfaceOption {
+	return func(c *ContractInterfaceConfig) {
+		c.ContractConfig = cc
+	}
+}
+
+func WithSafeSigner(safeSigner signer.SafeTradingSigner) ContractInterfaceOption {
+	return func(c *ContractInterfaceConfig) {
+		c.SignatureType = SignatureTypePolyGnosisSafe
+		c.SafeTradingSigner = safeSigner
+	}
+}
+
+func WithEOASigner(eoaSigner signer.EOATradingSigner) ContractInterfaceOption {
+	return func(c *ContractInterfaceConfig) {
+		c.SignatureType = SignatureTypeEOA
+		c.EOATradingSigner = eoaSigner
+	}
+}
+
+func WithTransactionSender(txSender sender.TransactionSender) ContractInterfaceOption {
+	return func(c *ContractInterfaceConfig) {
+		c.TxSender = txSender
+	}
+}
 
 func NewContractInterface(
 	client ethclient.EthClientInterface,
@@ -81,13 +108,30 @@ func NewContractInterface(
 		ContractConfig: MATIC_CONTRACTS,
 	}
 
+	chainID, err := client.ChainID(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get chainID: %v", err)
+	}
+
 	for _, opFn := range options {
 		opFn(defaultOptions)
 	}
 
-	chainID, err := client.ChainID(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get chainID: %v", err)
+	if defaultOptions.TxSender == nil {
+		var txSender sender.TransactionSender
+		switch defaultOptions.SignatureType {
+		case SignatureTypePolyGnosisSafe:
+			txSender = defaultOptions.SafeTradingSigner
+		case SignatureTypeEOA:
+			txSender, err = signer.GetTransactionSenderBySigner(chainID, client, defaultOptions.EOATradingSigner)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get txSender for EOA signer: %v", err)
+			}
+		case SignatureTypePolyProxy:
+			return nil, fmt.Errorf("not support polyProxy")
+		}
+
+		defaultOptions.TxSender = txSender
 	}
 
 	// Initialize Collateral (USDC) contract
@@ -142,11 +186,13 @@ func NewContractInterface(
 	}
 
 	return &ContractInterface{
-		chainID:        chainID,
-		client:         client,
-		contractConfig: defaultOptions.ContractConfig,
-		signatureType:  defaultOptions.SignatureType,
-		txSender:       defaultOptions.TxSender,
+		chainID:           chainID,
+		client:            client,
+		contractConfig:    defaultOptions.ContractConfig,
+		signatureType:     defaultOptions.SignatureType,
+		txSender:          defaultOptions.TxSender,
+		safeTradingSigner: defaultOptions.SafeTradingSigner,
+		eoaTradingSigner:  defaultOptions.EOATradingSigner,
 
 		collateralContract:        usdcContract,
 		conditionalTokensContract: ctfContract,
@@ -232,6 +278,14 @@ func (b *ContractInterface) getSafeTradingSigner() signer.SafeTradingSigner {
 	}
 
 	return b.safeTradingSigner
+}
+
+func (b *ContractInterface) getEOATradingSigner() signer.EOATradingSigner {
+	if b.eoaTradingSigner == nil {
+		panic("no EOA trading signer provided")
+	}
+
+	return b.eoaTradingSigner
 }
 
 // CheckBalanceAndAllowance checks the USDC balance and all allowances for the given address
@@ -404,23 +458,58 @@ func (b *ContractInterface) DeploySafe() (safeProxy common.Address, txHash commo
 }
 
 func (b *ContractInterface) EnableTrading(ctx context.Context) ([]common.Hash, error) {
-	return b.EnableTradingForSafe(ctx, b.getSafeTradingSigner(), b.chainID)
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.EnableTradingForSafe(ctx, b.getSafeTradingSigner(), b.chainID)
+	case SignatureTypeEOA:
+		return b.EnableTradingForEOA(ctx, b.getEOATradingSigner())
+	default:
+		return nil, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
 }
 
 func (b *ContractInterface) Redeem(ctx context.Context, conditionId [32]byte, indexSets []*big.Int) (common.Hash, error) {
-	return b.RedeemPositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, indexSets)
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.RedeemPositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, indexSets)
+	case SignatureTypeEOA:
+		return b.RedeemPositionsForEOA(ctx, b.getEOATradingSigner(), conditionId, indexSets)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
 }
 
 func (b *ContractInterface) RedeemNegRisk(ctx context.Context, conditionId [32]byte, amounts []*big.Int) (common.Hash, error) {
-	return b.RedeemPositionsNegRiskForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, amounts)
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.RedeemPositionsNegRiskForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, amounts)
+	case SignatureTypeEOA:
+		return b.RedeemPositionsNegRiskForEOA(ctx, b.getEOATradingSigner(), conditionId, amounts)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
 }
 
 func (b *ContractInterface) Split(ctx context.Context, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
-	return b.SplitPositionForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.SplitPositionForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
+	case SignatureTypeEOA:
+		return b.SplitPositionForEOA(ctx, b.getEOATradingSigner(), conditionId, partition, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
 }
 
 func (b *ContractInterface) Merge(ctx context.Context, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
-	return b.MergePositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.MergePositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
+	case SignatureTypeEOA:
+		return b.MergePositionsForEOA(ctx, b.getEOATradingSigner(), conditionId, partition, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
 }
 
 func (b *ContractInterface) DeploySafeBySender(txSender sender.TransactionSender, signer ethsig.TypedDataSigner) (safeProxy common.Address, txHash common.Hash, err error) {
@@ -471,6 +560,20 @@ func (b *ContractInterface) DeploySafeWithSig(txSender sender.TransactionSender,
 	}
 
 	addr := crypto.PubkeyToAddress(*pubkey)
+	safeProxy, err = b.GetSafeAddress(addr)
+	if err != nil {
+		return
+	}
+
+	code, err := b.client.CodeAt(context.Background(), safeProxy, nil)
+	if err != nil {
+		return
+	}
+
+	if len(code) != 0 {
+		err = fmt.Errorf("already deployed")
+		return
+	}
 
 	zeroAddr := common.Address{}
 	factoryAbi, err := safeproxyfactory.SafeProxyFactoryMetaData.GetAbi()
@@ -488,7 +591,6 @@ func (b *ContractInterface) DeploySafeWithSig(txSender sender.TransactionSender,
 		return
 	}
 
-	safeProxy, err = b.GetSafeAddress(addr)
 	return
 }
 
@@ -697,6 +799,233 @@ func (b *ContractInterface) EnableTradingForSafe(
 	}
 
 	return txHashes, nil
+}
+
+// EnableTradingForEOA enables trading for an EOA wallet by setting all required allowances
+// This function directly calls contract methods without going through Safe
+func (b *ContractInterface) EnableTradingForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+) ([]common.Hash, error) {
+	var txHashes []common.Hash
+
+	eoaAddr := eoaSigner.GetAddress()
+	txSender := b.getTxSender()
+
+	// Check current status
+	info, err := b.CheckBalanceAndAllowance(ctx, eoaAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check balance and allowance: %w", err)
+	}
+
+	// Maximum allowance for ERC20 approvals
+	maxAllowance := new(big.Int)
+	maxAllowance.SetString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
+
+	// Parse ERC20 ABI for approve function
+	erc20ABI, err := abi.JSON(strings.NewReader(erc20.Erc20MetaData.ABI))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ERC20 ABI: %w", err)
+	}
+
+	// Parse ConditionalTokens ABI for setApprovalForAll function
+	ctfABI, err := abi.JSON(strings.NewReader(conditional_tokens.ConditionalTokensMetaData.ABI))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+	}
+
+	// Approve USDC for all contracts if needed
+	if info.AllowanceExchange.Cmp(big.NewInt(0)) == 0 {
+		approveData, err := erc20ABI.Pack("approve", b.contractConfig.Exchange, maxAllowance)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack approve data for Exchange: %w", err)
+		}
+		txHash, err := txSender.SendEthereumTransaction(b.contractConfig.Collateral, approveData, big.NewInt(0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to send USDC → Exchange approval transaction: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+	}
+
+	if info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) == 0 {
+		approveData, err := erc20ABI.Pack("approve", b.contractConfig.NegRiskAdapter, maxAllowance)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack approve data for NegRiskAdapter: %w", err)
+		}
+		txHash, err := txSender.SendEthereumTransaction(b.contractConfig.Collateral, approveData, big.NewInt(0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to send USDC → NegRiskAdapter approval transaction: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+	}
+
+	if info.AllowanceNegRiskExchange.Cmp(big.NewInt(0)) == 0 {
+		approveData, err := erc20ABI.Pack("approve", b.contractConfig.NegRiskExchange, maxAllowance)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack approve data for NegRiskExchange: %w", err)
+		}
+		txHash, err := txSender.SendEthereumTransaction(b.contractConfig.Collateral, approveData, big.NewInt(0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to send USDC → NegRiskExchange approval transaction: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+	}
+
+	// Approve CTF for all contracts if needed
+	if !info.CTFApprovedExchange {
+		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.Exchange, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack setApprovalForAll data for Exchange: %w", err)
+		}
+		txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, setApprovalData, big.NewInt(0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to send CTF → Exchange approval transaction: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+	}
+
+	if !info.CTFApprovedNegRiskAdapter {
+		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.NegRiskAdapter, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack setApprovalForAll data for NegRiskAdapter: %w", err)
+		}
+		txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, setApprovalData, big.NewInt(0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to send CTF → NegRiskAdapter approval transaction: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+	}
+
+	if !info.CTFApprovedNegRiskExchange {
+		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.NegRiskExchange, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack setApprovalForAll data for NegRiskExchange: %w", err)
+		}
+		txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, setApprovalData, big.NewInt(0))
+		if err != nil {
+			return nil, fmt.Errorf("failed to send CTF → NegRiskExchange approval transaction: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+	}
+
+	return txHashes, nil
+}
+
+// RedeemPositionsForEOA redeems conditional tokens for a resolved market using EOA
+func (b *ContractInterface) RedeemPositionsForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	conditionId [32]byte,
+	indexSets []*big.Int,
+) (common.Hash, error) {
+	txSender := b.getTxSender()
+
+	// Prepare calldata for redeemPositions
+	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+	}
+	parentCollectionId := [32]byte{} // empty for root collection
+	calldata, err := parsedABI.Pack("redeemPositions", b.contractConfig.Collateral, parentCollectionId, conditionId, indexSets)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
+	}
+
+	// Send transaction
+	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, calldata, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send redeem transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// RedeemPositionsNegRiskForEOA redeems NegRisk market positions using EOA
+func (b *ContractInterface) RedeemPositionsNegRiskForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	conditionId [32]byte,
+	amounts []*big.Int,
+) (common.Hash, error) {
+	txSender := b.getTxSender()
+
+	// Prepare calldata for redeemPositions (NegRisk)
+	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+	}
+	calldata, err := parsedABI.Pack("redeemPositions", conditionId, amounts)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
+	}
+
+	// Send transaction
+	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.NegRiskAdapter, calldata, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send NegRisk redeem transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// SplitPositionForEOA splits collateral into conditional tokens for an EOA wallet
+func (b *ContractInterface) SplitPositionForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	txSender := b.getTxSender()
+
+	// Prepare calldata for splitPosition
+	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+	}
+	parentCollectionId := [32]byte{} // empty for root collection
+	calldata, err := parsedABI.Pack("splitPosition", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack splitPosition calldata: %w", err)
+	}
+
+	// Send transaction
+	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, calldata, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send split transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// MergePositionsForEOA merges conditional tokens back into collateral for an EOA wallet
+func (b *ContractInterface) MergePositionsForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	txSender := b.getTxSender()
+
+	// Prepare calldata for mergePositions
+	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+	}
+	parentCollectionId := [32]byte{} // empty for root collection
+	calldata, err := parsedABI.Pack("mergePositions", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack mergePositions calldata: %w", err)
+	}
+
+	// Send transaction
+	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, calldata, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send merge transaction: %w", err)
+	}
+
+	return txHash, nil
 }
 
 // RedeemPositionsForSafe redeems conditional tokens for a resolved market using TransactionSender

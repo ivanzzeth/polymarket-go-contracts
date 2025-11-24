@@ -9,8 +9,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ivanzzeth/ethsig"
-	polymarket "github.com/ivanzzeth/polymarket-go-contracts"
+	polymarketcontracts "github.com/ivanzzeth/polymarket-go-contracts"
+	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
 
 func main() {
@@ -34,17 +34,17 @@ func main() {
 	eoaAddress := crypto.PubkeyToAddress(privateKey.PublicKey)
 	log.Printf("EOA Address: %s", eoaAddress.Hex())
 
-	// Initialize contract interface
-	config := polymarket.GetContractConfig(polygonChainID)
-	polymarketInterface, err := polymarket.NewContractInterface(client, config)
+	// Create Safe trading signer from private key
+	safeSigner, err := signer.NewSafeTradingPrivateKeySigner(polygonChainID, client, privateKey)
 	if err != nil {
-		log.Fatalf("Failed to create contract interface: %v", err)
+		log.Fatalf("Failed to create safe signer: %v", err)
 	}
 
-	// Create transaction signer
-	ethSigner, err := ethsig.NewEthPrivateKeySignerFromPrivateKeyHex(privateKeyHex)
+	// Initialize contract interface
+	config := polymarketcontracts.GetContractConfig(polygonChainID)
+	polymarketInterface, err := polymarketcontracts.NewContractInterface(client, polymarketcontracts.WithContractConfig(config), polymarketcontracts.WithSafeSigner(safeSigner))
 	if err != nil {
-		log.Fatalf("Failed to create signer: %v", err)
+		log.Fatalf("Failed to create contract interface: %v", err)
 	}
 
 	// Compute Safe address for this EOA
@@ -72,12 +72,16 @@ func main() {
 
 	// Enable trading through Safe
 	// The function will internally create TransactOpts and handle gas estimation
-	err = polymarketInterface.EnableTradingForSafe(ctx, ethSigner, polygonChainID, safeAddr)
+	txHashes, err := polymarketInterface.EnableTrading(ctx)
 	if err != nil {
 		log.Fatalf("Failed to enable trading for Safe: %v", err)
 	}
 
-	log.Println("\n✅ Trading successfully enabled for Safe!")
+	log.Println("✅ Trading successfully enabled for Safe!")
 	log.Printf("Safe can now trade on Polymarket: %s", safeAddr.Hex())
-	log.Printf("View on Polygonscan: https://polygonscan.com/address/%s", safeAddr.Hex())
+	log.Printf("Transaction hashes:")
+	for i, txHash := range txHashes {
+		log.Printf("  %d. %s", i+1, txHash.Hex())
+		log.Printf("     View on Polygonscan: https://polygonscan.com/tx/%s", txHash.Hex())
+	}
 }
