@@ -65,6 +65,10 @@ func (s CoboMpcSigner) GetAddress() common.Address {
 	return s.address
 }
 
+func (s CoboMpcSigner) CoboChainId() string {
+	return s.coboChainId
+}
+
 // SignTypedData signs EIP-712 typed data
 func (s *CoboMpcSigner) SignTypedData(typedData eip712.TypedData) ([]byte, error) {
 	mpcSource := coboWaas2.NewMpcMessageSignSource(coboWaas2.MESSAGESIGNSOURCETYPE_ORG_CONTROLLED, s.coboWalletId, s.address.Hex())

@@ -6,14 +6,14 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind/v2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ivanzzeth/ethsig"
+	"github.com/ivanzzeth/polymarket-go-contracts/sender"
 )
 
 // SafeTradingSigner defines the interface requirements for Safe trading operations
 type SafeTradingSigner interface {
 	ethsig.AddressGetter
 	ethsig.TypedDataSigner
-	TransactionSender
-	GetSafeAddress() common.Address
+	sender.TransactionSender
 }
 
 type SafeTradingSingleMpcSigner struct {

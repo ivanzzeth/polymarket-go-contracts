@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 
-	"github.com/CoboGlobal/cobo-waas2-go-sdk/cobo_waas2"
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ivanzzeth/ethclient"
 	"github.com/ivanzzeth/ethsig"
@@ -26,6 +25,7 @@ import (
 	negriskadapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-adapter"
 	negriskfees "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-fees"
 	safeproxyfactory "github.com/ivanzzeth/polymarket-go-contracts/contracts/safe-proxy-factory"
+	"github.com/ivanzzeth/polymarket-go-contracts/sender"
 	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
 
@@ -46,7 +46,7 @@ type ContractInterface struct {
 	contractConfig    *ContractConfig
 	signatureType     SignatureType
 	safeTradingSigner signer.SafeTradingSigner
-	txSender          TransactionSender
+	txSender          sender.TransactionSender
 
 	collateralContract        *erc20.Erc20
 	conditionalTokensContract *conditional_tokens.ConditionalTokens
@@ -56,12 +56,15 @@ type ContractInterface struct {
 	negRiskContract           *negrisk.NegRisk
 	negRiskFeesContract       *negriskfees.NegRiskFees
 	safeProxyFactoryContract  *safeproxyfactory.SafeProxyFactory
+
+	// Cache for Safe addresses (key: EOA address string, value: Safe address)
+	safeAddressCache sync.Map
 }
 
 type ContractInterfaceConfig struct {
 	// TODO: Support EOA
 	SignatureType     SignatureType // NOTE: Could ONLY support Safe right now.
-	TxSender          TransactionSender
+	TxSender          sender.TransactionSender
 	SafeTradingSigner signer.SafeTradingSigner
 
 	ContractConfig *ContractConfig
@@ -211,7 +214,7 @@ func (b *ContractInterface) GetClient() ethclient.EthClientInterface {
 	return b.client
 }
 
-func (b *ContractInterface) getTxSender() TransactionSender {
+func (b *ContractInterface) getTxSender() sender.TransactionSender {
 	if b.txSender != nil {
 		return b.txSender
 	}
@@ -379,7 +382,21 @@ func (b *ContractInterface) EstimateSafeTxGas(safeAddr, to common.Address, value
 }
 
 func (b *ContractInterface) GetSafeAddress(eoa common.Address) (common.Address, error) {
-	return b.GetSafeProxyFactory().ComputeProxyAddress(nil, eoa)
+	// Check cache first
+	if cached, ok := b.safeAddressCache.Load(eoa.Hex()); ok {
+		return cached.(common.Address), nil
+	}
+
+	// Compute safe address
+	safeAddr, err := b.GetSafeProxyFactory().ComputeProxyAddress(nil, eoa)
+	if err != nil {
+		return common.Address{}, err
+	}
+
+	// Store in cache
+	b.safeAddressCache.Store(eoa.Hex(), safeAddr)
+
+	return safeAddr, nil
 }
 
 func (b *ContractInterface) DeploySafe() (safeProxy common.Address, txHash common.Hash, err error) {
@@ -406,7 +423,7 @@ func (b *ContractInterface) Merge(ctx context.Context, conditionId [32]byte, par
 	return b.MergePositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
 }
 
-func (b *ContractInterface) DeploySafeBySender(txSender TransactionSender, signer ethsig.TypedDataSigner) (safeProxy common.Address, txHash common.Hash, err error) {
+func (b *ContractInterface) DeploySafeBySender(txSender sender.TransactionSender, signer ethsig.TypedDataSigner) (safeProxy common.Address, txHash common.Hash, err error) {
 	zeroAddr := common.Address{}
 	paymentToken := zeroAddr
 	payment := big.NewInt(0)
@@ -437,7 +454,7 @@ func (b *ContractInterface) DeploySafeBySender(txSender TransactionSender, signe
 	return b.DeploySafeWithSig(txSender, chainID, b.contractConfig.SafeProxyFactory, paymentToken, payment, paymentReceiver, createSig)
 }
 
-func (b *ContractInterface) DeploySafeWithSig(txSender TransactionSender, chainID *big.Int, safeFactory, paymentToken common.Address, payment *big.Int, paymentReceiver common.Address, createSig safeproxyfactory.SafeProxyFactorySig) (safeProxy common.Address, txHash common.Hash, err error) {
+func (b *ContractInterface) DeploySafeWithSig(txSender sender.TransactionSender, chainID *big.Int, safeFactory, paymentToken common.Address, payment *big.Int, paymentReceiver common.Address, createSig safeproxyfactory.SafeProxyFactorySig) (safeProxy common.Address, txHash common.Hash, err error) {
 	typedData := BuildCreateProxyTypedData(chainID, safeFactory, paymentToken, payment, paymentReceiver)
 	typedDataHash, _, err := eip712.TypedDataAndHash(typedData)
 	if err != nil {
@@ -473,101 +490,6 @@ func (b *ContractInterface) DeploySafeWithSig(txSender TransactionSender, chainI
 
 	safeProxy, err = b.GetSafeAddress(addr)
 	return
-}
-
-type TransactionSigner interface {
-	ethsig.TransactionSigner
-	ethsig.AddressGetter
-}
-
-func (b *ContractInterface) GetTransactionSenderrByTransactionSigner(client ethclient.EthClientInterface, txSigner TransactionSigner) (TransactionSender, error) {
-	chainId, err := client.ChainID(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	return &TransactionSenderrByTransactionSigner{
-		chainId:  chainId,
-		client:   client,
-		txSigner: txSigner,
-	}, nil
-}
-
-type TransactionSenderrByTransactionSigner struct {
-	chainId  *big.Int
-	client   ethclient.EthClientInterface
-	txSigner TransactionSigner
-}
-
-func (b *TransactionSenderrByTransactionSigner) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
-	ctx := context.Background()
-
-	// Get nonce
-	nonce, err := b.client.NonceAt(ctx, b.txSigner.GetAddress(), nil)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get nonce: %w", err)
-	}
-
-	// Get gas price
-	gasPrice, err := b.client.SuggestGasPrice(ctx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get gas price: %w", err)
-	}
-
-	// Estimate gas limit
-	msg := ethereum.CallMsg{
-		From:     b.txSigner.GetAddress(),
-		To:       &to,
-		Value:    value,
-		Data:     data,
-		GasPrice: gasPrice,
-	}
-	gasLimit, err := b.client.EstimateGas(ctx, msg)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to estimate gas: %w", err)
-	}
-
-	// Create and sign the transaction using BoundContract
-	// This is a workaround since we need to create a raw transaction
-	// We'll use the ethereum types directly
-	tx := types.NewTransaction(nonce, to, value, gasLimit, gasPrice, data)
-
-	// Sign the transaction
-	signedTx, err := b.txSigner.SignTransactionWithChainID(tx, b.chainId)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to sign transaction: %w", err)
-	}
-
-	// Send the signed transaction
-	err = b.client.SendTransaction(ctx, signedTx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send transaction: %w", err)
-	}
-
-	return signedTx.Hash(), nil
-}
-
-func (b *ContractInterface) GetTransactionSenderrByCoboMpcTransactionSender(mpcSigner *signer.CoboMpcSigner) (TransactionSender, error) {
-	return &CoboMpcTransactionSender{signer: mpcSigner}, nil
-}
-
-type CoboMpcTransactionSender struct {
-	signer *signer.CoboMpcSigner
-}
-
-func (s *CoboMpcTransactionSender) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
-	txResp, err := s.signer.CallContract(to.Hex(), fmt.Sprintf("0x%x", data), value.String(), nil)
-	if err != nil {
-		return common.Hash{}, err
-	}
-
-	txDetail, err := s.signer.WaitTransactionStatus(txResp.TransactionId, cobo_waas2.TRANSACTIONSTATUS_CONFIRMING, 100)
-	if err != nil {
-		return common.Hash{}, err
-	}
-
-	txHash := common.HexToHash(*txDetail.TransactionHash)
-	return txHash, nil
 }
 
 func (b *ContractInterface) ExecuteTransactionBySafeAndSingleSigner(safeSigner signer.SafeTradingSigner, chainID *big.Int, safeAddr common.Address, to common.Address, value *big.Int, data []byte, operation SafeOperation, safeTxGas *big.Int) (common.Hash, error) {
@@ -608,7 +530,7 @@ func (b *ContractInterface) ExecuteTransactionBySafeAndSingleSigner(safeSigner s
 	return b.ExecuteTransactionBySafe(safeSigner, safeAddr, to, value, data, operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, signature)
 }
 
-func (b *ContractInterface) ExecuteTransactionBySafe(txSender TransactionSender, safeAddr common.Address, to common.Address, value *big.Int, data []byte, operation SafeOperation, safeTxGas *big.Int, baseGas *big.Int, gasPrice *big.Int, gasToken common.Address, refundReceiver common.Address, signatures []byte) (common.Hash, error) {
+func (b *ContractInterface) ExecuteTransactionBySafe(txSender sender.TransactionSender, safeAddr common.Address, to common.Address, value *big.Int, data []byte, operation SafeOperation, safeTxGas *big.Int, baseGas *big.Int, gasPrice *big.Int, gasToken common.Address, refundReceiver common.Address, signatures []byte) (common.Hash, error) {
 	safeAbi, err := gnosissafel2.GnosisSafeL2MetaData.GetAbi()
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get Safe ABI: %w", err)
@@ -642,7 +564,10 @@ func (b *ContractInterface) EnableTradingForSafe(
 	// txSigner signer.TypedDataSigner,
 	chainID *big.Int,
 ) ([]common.Hash, error) {
-	safeAddr := safeSigner.GetSafeAddress()
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Safe address: %w", err)
+	}
 	var txHashes []common.Hash
 
 	// Check current status
@@ -782,7 +707,10 @@ func (b *ContractInterface) RedeemPositionsForSafe(
 	conditionId [32]byte,
 	indexSets []*big.Int,
 ) (common.Hash, error) {
-	safeAddr := safeSigner.GetSafeAddress()
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
 
 	// Prepare calldata for redeemPositions
 	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
@@ -819,7 +747,10 @@ func (b *ContractInterface) RedeemPositionsNegRiskForSafe(
 	conditionId [32]byte,
 	amounts []*big.Int,
 ) (common.Hash, error) {
-	safeAddr := safeSigner.GetSafeAddress()
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
 
 	// Prepare calldata for redeemPositions (NegRisk)
 	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
@@ -856,7 +787,10 @@ func (b *ContractInterface) SplitPositionForSafe(
 	partition []*big.Int,
 	amount *big.Int,
 ) (common.Hash, error) {
-	safeAddr := safeSigner.GetSafeAddress()
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
 
 	// Prepare calldata for splitPosition
 	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
@@ -894,7 +828,10 @@ func (b *ContractInterface) MergePositionsForSafe(
 	partition []*big.Int,
 	amount *big.Int,
 ) (common.Hash, error) {
-	safeAddr := safeSigner.GetSafeAddress()
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
 
 	// Prepare calldata for mergePositions
 	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()

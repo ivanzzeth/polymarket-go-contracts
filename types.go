@@ -1,11 +1,5 @@
 package polymarket
 
-import (
-	"math/big"
-
-	"github.com/ethereum/go-ethereum/common"
-)
-
 type SafeOperation uint8
 
 const (
@@ -25,7 +19,3 @@ const (
 
 const COLLATERAL_TOKEN_DECIMALS = 6
 const CONDITIONAL_TOKEN_DECIMALS = 6
-
-type TransactionSender interface {
-	SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error)
-}

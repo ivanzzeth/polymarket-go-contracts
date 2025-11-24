@@ -11,79 +11,79 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ivanzzeth/ethsig"
+	"github.com/ivanzzeth/polymarket-go-contracts/sender"
 )
 
-type TransactionSender interface {
-	SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error)
-}
-
-func GetTransactionSenderBySigner(chainId *big.Int, client bind.ContractBackend, signer any) (TransactionSender, error) {
-	switch s := signer.(type) {
+// GetTransactionSenderBySigner creates a TransactionSender based on the signer type
+func GetTransactionSenderBySigner(chainId *big.Int, client bind.ContractBackend, signerInstance any) (sender.TransactionSender, error) {
+	switch s := signerInstance.(type) {
 	case *CoboMpcSigner:
 		return GetTransactionSenderByCoboMpcTransactionSender(client, s)
 	case TransactionSignerAndAddrGetter:
-		return GetTransactionSenderByCoboMpcTransactionSignerAndAddrGetter(chainId, client, s)
+		return GetTransactionSenderByTransactionSignerAndAddrGetter(chainId, client, s)
 	default:
-		return nil, fmt.Errorf("unsupported signer type %T", signer)
+		return nil, fmt.Errorf("unsupported signer type %T", signerInstance)
 	}
 }
 
-type TransactionSenderrByTransactionSigner struct {
-	chainId  *big.Int
-	client   bind.ContractBackend
-	txSigner TransactionSignerAndAddrGetter
-}
-
-func GetTransactionSenderByCoboMpcTransactionSignerAndAddrGetter(chainId *big.Int, client bind.ContractBackend, signer TransactionSignerAndAddrGetter) (TransactionSender, error) {
-	return &TransactionSenderrByTransactionSigner{chainId: chainId, client: client, txSigner: signer}, nil
-}
-
+// TransactionSignerAndAddrGetter combines transaction signing and address retrieval
 type TransactionSignerAndAddrGetter interface {
 	ethsig.AddressGetter
 	ethsig.TransactionSigner
 }
 
-func (b *TransactionSenderrByTransactionSigner) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
+// TransactionSenderByTransactionSigner implements TransactionSender using a transaction signer
+type TransactionSenderByTransactionSigner struct {
+	chainId  *big.Int
+	client   bind.ContractBackend
+	txSigner TransactionSignerAndAddrGetter
+}
+
+// GetTransactionSenderByTransactionSignerAndAddrGetter creates a TransactionSender from a transaction signer
+func GetTransactionSenderByTransactionSignerAndAddrGetter(chainId *big.Int, client bind.ContractBackend, txSigner TransactionSignerAndAddrGetter) (sender.TransactionSender, error) {
+	return &TransactionSenderByTransactionSigner{chainId: chainId, client: client, txSigner: txSigner}, nil
+}
+
+// SendEthereumTransaction sends an Ethereum transaction using the transaction signer
+func (s *TransactionSenderByTransactionSigner) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
 	ctx := context.Background()
 
 	// Get nonce
-	nonce, err := b.client.PendingNonceAt(ctx, b.txSigner.GetAddress())
+	nonce, err := s.client.PendingNonceAt(ctx, s.txSigner.GetAddress())
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get nonce: %w", err)
 	}
 
 	// Get gas price
-	gasPrice, err := b.client.SuggestGasPrice(ctx)
+	gasPrice, err := s.client.SuggestGasPrice(ctx)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get gas price: %w", err)
 	}
 
 	// Estimate gas limit
 	msg := ethereum.CallMsg{
-		From:     b.txSigner.GetAddress(),
+		From:     s.txSigner.GetAddress(),
 		To:       &to,
 		Value:    value,
 		Data:     data,
 		GasPrice: gasPrice,
 	}
-	gasLimit, err := b.client.EstimateGas(ctx, msg)
+	gasLimit, err := s.client.EstimateGas(ctx, msg)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to estimate gas: %w", err)
 	}
 
-	// Create and sign the transaction using BoundContract
-	// This is a workaround since we need to create a raw transaction
-	// We'll use the ethereum types directly
+	// Create and sign the transaction
 	tx := types.NewTransaction(nonce, to, value, gasLimit, gasPrice, data)
 
 	// Sign the transaction
-	signedTx, err := b.txSigner.SignTransactionWithChainID(tx, b.chainId)
+	signedTx, err := s.txSigner.SignTransactionWithChainID(tx, s.chainId)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
 	// Send the signed transaction
-	err = b.client.SendTransaction(ctx, signedTx)
+	err = s.client.SendTransaction(ctx, signedTx)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to send transaction: %w", err)
 	}
@@ -91,26 +91,28 @@ func (b *TransactionSenderrByTransactionSigner) SendEthereumTransaction(to commo
 	return signedTx.Hash(), nil
 }
 
-func GetTransactionSenderByCoboMpcTransactionSender(client bind.ContractBackend, mpcSigner *CoboMpcSigner) (TransactionSender, error) {
-	return &CoboMpcTransactionSender{client: client, signer: mpcSigner}, nil
-}
-
+// CoboMpcTransactionSender implements TransactionSender using Cobo MPC wallet
 type CoboMpcTransactionSender struct {
 	client bind.ContractBackend
 	signer *CoboMpcSigner
 }
 
+// GetTransactionSenderByCoboMpcTransactionSender creates a TransactionSender for Cobo MPC
+func GetTransactionSenderByCoboMpcTransactionSender(client bind.ContractBackend, mpcSigner *CoboMpcSigner) (sender.TransactionSender, error) {
+	return &CoboMpcTransactionSender{client: client, signer: mpcSigner}, nil
+}
+
+// SendEthereumTransaction sends an Ethereum transaction using Cobo MPC wallet
 func (s *CoboMpcTransactionSender) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
 	gasPrice, err := s.client.SuggestGasPrice(context.Background())
 	if err != nil {
 		return common.Hash{}, err
 	}
 
+	// Increase gas price by 50%
 	gasPrice.Mul(gasPrice, big.NewInt(15))
 	gasPrice.Div(gasPrice, big.NewInt(10))
-	// fee := &cobo_waas2.TransactionRequestFee{
-	// 	TransactionRequestEvmLegacyFee: cobo_waas2.NewTransactionRequestEvmLegacyFee(gasPrice.String(), cobo_waas2.FEETYPE_EVM_LEGACY, s.signer.coboChainId),
-	// }
+
 	gasLimit, err := s.client.EstimateGas(context.Background(), ethereum.CallMsg{
 		From:  s.signer.GetAddress(),
 		To:    &to,
@@ -121,7 +123,7 @@ func (s *CoboMpcTransactionSender) SendEthereumTransaction(to common.Address, da
 		return common.Hash{}, err
 	}
 
-	fee := cobo_waas2.NewTransactionRequestEvmLegacyFee(gasPrice.String(), cobo_waas2.FEETYPE_EVM_LEGACY, s.signer.coboChainId)
+	fee := cobo_waas2.NewTransactionRequestEvmLegacyFee(gasPrice.String(), cobo_waas2.FEETYPE_EVM_LEGACY, s.signer.CoboChainId())
 	fee.SetGasLimit(big.NewInt(int64(gasLimit)).String())
 
 	paramFee := cobo_waas2.TransactionRequestEvmLegacyFeeAsTransactionRequestFee(fee)
