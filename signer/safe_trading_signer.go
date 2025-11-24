@@ -13,6 +13,7 @@ type SafeTradingSigner interface {
 	ethsig.AddressGetter
 	ethsig.TypedDataSigner
 	TransactionSender
+	GetSafeAddress() common.Address
 }
 
 type SafeTradingSingleMpcSigner struct {

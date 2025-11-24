@@ -41,10 +41,12 @@ type BalanceAllowanceInfo struct {
 }
 
 type ContractInterface struct {
-	client         ethclient.EthClientInterface
-	contractConfig *ContractConfig
-	signatureType  SignatureType
-	txSender       TransactionSender
+	chainID           *big.Int
+	client            ethclient.EthClientInterface
+	contractConfig    *ContractConfig
+	signatureType     SignatureType
+	safeTradingSigner signer.SafeTradingSigner
+	txSender          TransactionSender
 
 	collateralContract        *erc20.Erc20
 	conditionalTokensContract *conditional_tokens.ConditionalTokens
@@ -57,8 +59,10 @@ type ContractInterface struct {
 }
 
 type ContractInterfaceConfig struct {
-	SignatureType SignatureType
-	TxSender      TransactionSender
+	// TODO: Support EOA
+	SignatureType     SignatureType // NOTE: Could ONLY support Safe right now.
+	TxSender          TransactionSender
+	SafeTradingSigner signer.SafeTradingSigner
 
 	ContractConfig *ContractConfig
 }
@@ -76,6 +80,11 @@ func NewContractInterface(
 
 	for _, opFn := range options {
 		opFn(defaultOptions)
+	}
+
+	chainID, err := client.ChainID(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get chainID: %v", err)
 	}
 
 	// Initialize Collateral (USDC) contract
@@ -130,6 +139,7 @@ func NewContractInterface(
 	}
 
 	return &ContractInterface{
+		chainID:        chainID,
 		client:         client,
 		contractConfig: defaultOptions.ContractConfig,
 		signatureType:  defaultOptions.SignatureType,
@@ -199,6 +209,26 @@ func (b *ContractInterface) GetConfig() *ContractConfig {
 // GetClient returns the Ethereum client
 func (b *ContractInterface) GetClient() ethclient.EthClientInterface {
 	return b.client
+}
+
+func (b *ContractInterface) getTxSender() TransactionSender {
+	if b.txSender != nil {
+		return b.txSender
+	}
+
+	if b.safeTradingSigner != nil {
+		return b.safeTradingSigner
+	}
+
+	panic("no any transaction sender provided")
+}
+
+func (b *ContractInterface) getSafeTradingSigner() signer.SafeTradingSigner {
+	if b.safeTradingSigner == nil {
+		panic("no safe trading signer provided")
+	}
+
+	return b.safeTradingSigner
 }
 
 // CheckBalanceAndAllowance checks the USDC balance and all allowances for the given address
@@ -352,6 +382,30 @@ func (b *ContractInterface) GetSafeAddress(eoa common.Address) (common.Address, 
 	return b.GetSafeProxyFactory().ComputeProxyAddress(nil, eoa)
 }
 
+func (b *ContractInterface) DeploySafe() (safeProxy common.Address, txHash common.Hash, err error) {
+	return b.DeploySafeBySender(b.getTxSender(), b.getSafeTradingSigner())
+}
+
+func (b *ContractInterface) EnableTrading(ctx context.Context) ([]common.Hash, error) {
+	return b.EnableTradingForSafe(ctx, b.getSafeTradingSigner(), b.chainID)
+}
+
+func (b *ContractInterface) Redeem(ctx context.Context, conditionId [32]byte, indexSets []*big.Int) (common.Hash, error) {
+	return b.RedeemPositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, indexSets)
+}
+
+func (b *ContractInterface) RedeemNegRisk(ctx context.Context, conditionId [32]byte, amounts []*big.Int) (common.Hash, error) {
+	return b.RedeemPositionsNegRiskForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, amounts)
+}
+
+func (b *ContractInterface) Split(ctx context.Context, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.SplitPositionForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) Merge(ctx context.Context, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.MergePositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
+}
+
 func (b *ContractInterface) DeploySafeBySender(txSender TransactionSender, signer ethsig.TypedDataSigner) (safeProxy common.Address, txHash common.Hash, err error) {
 	zeroAddr := common.Address{}
 	paymentToken := zeroAddr
@@ -400,7 +454,6 @@ func (b *ContractInterface) DeploySafeWithSig(txSender TransactionSender, chainI
 	}
 
 	addr := crypto.PubkeyToAddress(*pubkey)
-	fmt.Printf("DeploySafeWithSig for address %v\n", addr.Hex())
 
 	zeroAddr := common.Address{}
 	factoryAbi, err := safeproxyfactory.SafeProxyFactoryMetaData.GetAbi()
@@ -581,33 +634,21 @@ func (b *ContractInterface) ExecuteTransactionBySafe(txSender TransactionSender,
 	return txSender.SendEthereumTransaction(safeAddr, execTransactionData, big.NewInt(0))
 }
 
-// SafeTradingSigner defines the interface requirements for Safe trading operations
-type SafeTradingSigner interface {
-	ethsig.AddressGetter
-	ethsig.TypedDataSigner
-	TransactionSender
-}
-
 // EnableTradingForSafe enables trading for a Safe wallet by setting all required allowances
 // This function uses ExecuteTransactionBySafeAndSingleSigner to execute all approval operations
 func (b *ContractInterface) EnableTradingForSafe(
 	ctx context.Context,
-	safeSigner SafeTradingSigner,
+	safeSigner signer.SafeTradingSigner,
 	// txSigner signer.TypedDataSigner,
 	chainID *big.Int,
-	safeAddr common.Address,
-) error {
+) ([]common.Hash, error) {
+	safeAddr := safeSigner.GetSafeAddress()
+	var txHashes []common.Hash
+
 	// Check current status
 	info, err := b.CheckBalanceAndAllowance(ctx, safeAddr)
 	if err != nil {
-		return fmt.Errorf("failed to check balance and allowance: %w", err)
-	}
-
-	// Print current status
-	fmt.Println("=== Safe Balance and Allowance Status ===")
-	fmt.Printf("Safe Address: %s\n", safeAddr.Hex())
-	if err := b.PrintBalanceAndAllowance(ctx, safeAddr); err != nil {
-		return err
+		return nil, fmt.Errorf("failed to check balance and allowance: %w", err)
 	}
 
 	// Maximum allowance for ERC20 approvals
@@ -617,23 +658,20 @@ func (b *ContractInterface) EnableTradingForSafe(
 	// Parse ERC20 ABI for approve function
 	erc20ABI, err := abi.JSON(strings.NewReader(erc20.Erc20MetaData.ABI))
 	if err != nil {
-		return fmt.Errorf("failed to parse ERC20 ABI: %w", err)
+		return nil, fmt.Errorf("failed to parse ERC20 ABI: %w", err)
 	}
 
 	// Parse ConditionalTokens ABI for setApprovalForAll function
 	ctfABI, err := abi.JSON(strings.NewReader(conditional_tokens.ConditionalTokensMetaData.ABI))
 	if err != nil {
-		return fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+		return nil, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
 	}
-
-	fmt.Println("\n=== Setting Allowances via Safe ===")
 
 	// Approve USDC for all contracts if needed
 	if info.AllowanceExchange.Cmp(big.NewInt(0)) == 0 {
-		fmt.Printf("Setting USDC → Exchange allowance...\n")
 		approveData, err := erc20ABI.Pack("approve", b.contractConfig.Exchange, maxAllowance)
 		if err != nil {
-			return fmt.Errorf("failed to pack approve data for Exchange: %w", err)
+			return nil, fmt.Errorf("failed to pack approve data for Exchange: %w", err)
 		}
 
 		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
@@ -642,16 +680,15 @@ func (b *ContractInterface) EnableTradingForSafe(
 			SafeOperationCall, big.NewInt(0),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to execute Safe transaction for USDC → Exchange approval: %w", err)
+			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → Exchange approval: %w", err)
 		}
-		fmt.Printf("  ✅ Transaction submitted: %s\n", txHash.Hex())
+		txHashes = append(txHashes, txHash)
 	}
 
 	if info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) == 0 {
-		fmt.Printf("Setting USDC → NegRiskAdapter allowance...\n")
 		approveData, err := erc20ABI.Pack("approve", b.contractConfig.NegRiskAdapter, maxAllowance)
 		if err != nil {
-			return fmt.Errorf("failed to pack approve data for NegRiskAdapter: %w", err)
+			return nil, fmt.Errorf("failed to pack approve data for NegRiskAdapter: %w", err)
 		}
 
 		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
@@ -660,16 +697,15 @@ func (b *ContractInterface) EnableTradingForSafe(
 			SafeOperationCall, big.NewInt(0),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to execute Safe transaction for USDC → NegRiskAdapter approval: %w", err)
+			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → NegRiskAdapter approval: %w", err)
 		}
-		fmt.Printf("  ✅ Transaction submitted: %s\n", txHash.Hex())
+		txHashes = append(txHashes, txHash)
 	}
 
 	if info.AllowanceNegRiskExchange.Cmp(big.NewInt(0)) == 0 {
-		fmt.Printf("Setting USDC → NegRiskExchange allowance...\n")
 		approveData, err := erc20ABI.Pack("approve", b.contractConfig.NegRiskExchange, maxAllowance)
 		if err != nil {
-			return fmt.Errorf("failed to pack approve data for NegRiskExchange: %w", err)
+			return nil, fmt.Errorf("failed to pack approve data for NegRiskExchange: %w", err)
 		}
 
 		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
@@ -678,17 +714,16 @@ func (b *ContractInterface) EnableTradingForSafe(
 			SafeOperationCall, big.NewInt(0),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to execute Safe transaction for USDC → NegRiskExchange approval: %w", err)
+			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → NegRiskExchange approval: %w", err)
 		}
-		fmt.Printf("  ✅ Transaction submitted: %s\n", txHash.Hex())
+		txHashes = append(txHashes, txHash)
 	}
 
 	// Approve CTF for all contracts if needed
 	if !info.CTFApprovedExchange {
-		fmt.Printf("Setting CTF → Exchange approval...\n")
 		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.Exchange, true)
 		if err != nil {
-			return fmt.Errorf("failed to pack setApprovalForAll data for Exchange: %w", err)
+			return nil, fmt.Errorf("failed to pack setApprovalForAll data for Exchange: %w", err)
 		}
 
 		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
@@ -697,16 +732,15 @@ func (b *ContractInterface) EnableTradingForSafe(
 			SafeOperationCall, big.NewInt(0),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to execute Safe transaction for CTF → Exchange approval: %w", err)
+			return nil, fmt.Errorf("failed to execute Safe transaction for CTF → Exchange approval: %w", err)
 		}
-		fmt.Printf("  ✅ Transaction submitted: %s\n", txHash.Hex())
+		txHashes = append(txHashes, txHash)
 	}
 
 	if !info.CTFApprovedNegRiskAdapter {
-		fmt.Printf("Setting CTF → NegRiskAdapter approval...\n")
 		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.NegRiskAdapter, true)
 		if err != nil {
-			return fmt.Errorf("failed to pack setApprovalForAll data for NegRiskAdapter: %w", err)
+			return nil, fmt.Errorf("failed to pack setApprovalForAll data for NegRiskAdapter: %w", err)
 		}
 
 		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
@@ -715,16 +749,15 @@ func (b *ContractInterface) EnableTradingForSafe(
 			SafeOperationCall, big.NewInt(0),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to execute Safe transaction for CTF → NegRiskAdapter approval: %w", err)
+			return nil, fmt.Errorf("failed to execute Safe transaction for CTF → NegRiskAdapter approval: %w", err)
 		}
-		fmt.Printf("  ✅ Transaction submitted: %s\n", txHash.Hex())
+		txHashes = append(txHashes, txHash)
 	}
 
 	if !info.CTFApprovedNegRiskExchange {
-		fmt.Printf("Setting CTF → NegRiskExchange approval...\n")
 		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.NegRiskExchange, true)
 		if err != nil {
-			return fmt.Errorf("failed to pack setApprovalForAll data for NegRiskExchange: %w", err)
+			return nil, fmt.Errorf("failed to pack setApprovalForAll data for NegRiskExchange: %w", err)
 		}
 
 		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
@@ -733,13 +766,12 @@ func (b *ContractInterface) EnableTradingForSafe(
 			SafeOperationCall, big.NewInt(0),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to execute Safe transaction for CTF → NegRiskExchange approval: %w", err)
+			return nil, fmt.Errorf("failed to execute Safe transaction for CTF → NegRiskExchange approval: %w", err)
 		}
-		fmt.Printf("  ✅ Transaction submitted: %s\n", txHash.Hex())
+		txHashes = append(txHashes, txHash)
 	}
 
-	fmt.Println("\n✅ All allowances are set! Trading is enabled for Safe.")
-	return nil
+	return txHashes, nil
 }
 
 // RedeemPositionsForSafe redeems conditional tokens for a resolved market using TransactionSender
@@ -747,25 +779,20 @@ func (b *ContractInterface) RedeemPositionsForSafe(
 	ctx context.Context,
 	safeSigner signer.SafeTradingSigner,
 	chainID *big.Int,
-	safeAddr common.Address,
 	conditionId [32]byte,
 	indexSets []*big.Int,
-) error {
-	// Check USDC balance before redeem
-	balanceBefore, err := b.collateralContract.BalanceOf(&bind.CallOpts{Context: ctx}, safeAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get balance before redeem: %w", err)
-	}
+) (common.Hash, error) {
+	safeAddr := safeSigner.GetSafeAddress()
 
 	// Prepare calldata for redeemPositions
 	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
 	if err != nil {
-		return fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
 	}
 	parentCollectionId := [32]byte{} // empty for root collection
 	calldata, err := parsedABI.Pack("redeemPositions", b.contractConfig.Collateral, parentCollectionId, conditionId, indexSets)
 	if err != nil {
-		return fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
 	}
 
 	// Execute Safe transaction
@@ -778,22 +805,10 @@ func (b *ContractInterface) RedeemPositionsForSafe(
 		big.NewInt(0), // safeTxGas will be auto-estimated
 	)
 	if err != nil {
-		return fmt.Errorf("failed to execute Safe transaction: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
 	}
 
-	fmt.Printf("✅ Redeem transaction submitted: %s\n", txHash.Hex())
-
-	// Check USDC balance after redeem
-	balanceAfter, err := b.collateralContract.BalanceOf(&bind.CallOpts{Context: ctx}, safeAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get balance after redeem: %w", err)
-	}
-
-	// Calculate the increase
-	balanceIncrease := new(big.Int).Sub(balanceAfter, balanceBefore)
-	fmt.Printf("✅ Redeemed %s USDC\n", formatUSDC(balanceIncrease))
-
-	return nil
+	return txHash, nil
 }
 
 // RedeemPositionsNegRiskForSafe redeems NegRisk market positions using TransactionSender
@@ -801,24 +816,19 @@ func (b *ContractInterface) RedeemPositionsNegRiskForSafe(
 	ctx context.Context,
 	safeSigner signer.SafeTradingSigner,
 	chainID *big.Int,
-	safeAddr common.Address,
 	conditionId [32]byte,
 	amounts []*big.Int,
-) error {
-	// Check USDC balance before redeem
-	balanceBefore, err := b.collateralContract.BalanceOf(&bind.CallOpts{Context: ctx}, safeAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get balance before redeem: %w", err)
-	}
+) (common.Hash, error) {
+	safeAddr := safeSigner.GetSafeAddress()
 
 	// Prepare calldata for redeemPositions (NegRisk)
 	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
 	if err != nil {
-		return fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
 	}
 	calldata, err := parsedABI.Pack("redeemPositions", conditionId, amounts)
 	if err != nil {
-		return fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
 	}
 
 	// Execute Safe transaction
@@ -831,22 +841,86 @@ func (b *ContractInterface) RedeemPositionsNegRiskForSafe(
 		big.NewInt(0), // safeTxGas will be auto-estimated
 	)
 	if err != nil {
-		return fmt.Errorf("failed to execute Safe transaction: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
 	}
 
-	fmt.Printf("✅ NegRisk redeem transaction submitted: %s\n", txHash.Hex())
+	return txHash, nil
+}
 
-	// Check USDC balance after redeem
-	balanceAfter, err := b.collateralContract.BalanceOf(&bind.CallOpts{Context: ctx}, safeAddr)
+// SplitPositionForSafe splits collateral into conditional tokens for a Safe wallet
+func (b *ContractInterface) SplitPositionForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	safeAddr := safeSigner.GetSafeAddress()
+
+	// Prepare calldata for splitPosition
+	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
 	if err != nil {
-		return fmt.Errorf("failed to get balance after redeem: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+	}
+	parentCollectionId := [32]byte{} // empty for root collection
+	calldata, err := parsedABI.Pack("splitPosition", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack splitPosition calldata: %w", err)
 	}
 
-	// Calculate the increase
-	balanceIncrease := new(big.Int).Sub(balanceAfter, balanceBefore)
-	fmt.Printf("✅ Redeemed %s USDC from NegRisk market\n", formatUSDC(balanceIncrease))
+	// Execute Safe transaction
+	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
+		safeSigner, chainID, safeAddr,
+		b.contractConfig.ConditionalTokens,
+		big.NewInt(0), // value
+		calldata,
+		SafeOperationCall,
+		big.NewInt(0), // safeTxGas will be auto-estimated
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
+	}
 
-	return nil
+	return txHash, nil
+}
+
+// MergePositionsForSafe merges conditional tokens back into collateral for a Safe wallet
+func (b *ContractInterface) MergePositionsForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	safeAddr := safeSigner.GetSafeAddress()
+
+	// Prepare calldata for mergePositions
+	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+	}
+	parentCollectionId := [32]byte{} // empty for root collection
+	calldata, err := parsedABI.Pack("mergePositions", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack mergePositions calldata: %w", err)
+	}
+
+	// Execute Safe transaction
+	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
+		safeSigner, chainID, safeAddr,
+		b.contractConfig.ConditionalTokens,
+		big.NewInt(0), // value
+		calldata,
+		SafeOperationCall,
+		big.NewInt(0), // safeTxGas will be auto-estimated
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
+	}
+
+	return txHash, nil
 }
 
 // BuildSafeTransactionTypedData builds the typed data for Gnosis Safe transaction
