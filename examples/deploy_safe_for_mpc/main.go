@@ -103,7 +103,7 @@ func main() {
 
 	log.Println("\n✅ Safe deployment via Cobo MPC completed successfully!")
 	log.Println("You can now use this Safe address for multi-signature operations with MPC.")
-	log.Printf("View on Polygonscan: https://polygonscan.com/address/%s", safeProxy.Hex())
+	log.Printf("View Safe: https://evm-explorer.web3gate.xyz/evm/137/address/%s", safeProxy.Hex())
 
 	log.Println("\n📝 Next steps:")
 	log.Println("   1. Fund the Safe with USDC for trading")

@@ -54,11 +54,13 @@ func (s *TransactionSenderByTransactionSigner) SendEthereumTransaction(to common
 		return common.Hash{}, fmt.Errorf("failed to get nonce: %w", err)
 	}
 
-	// Get gas price
+	// Get gas price and increase by 30% to improve transaction inclusion speed
 	gasPrice, err := s.client.SuggestGasPrice(ctx)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get gas price: %w", err)
 	}
+	gasPrice.Mul(gasPrice, big.NewInt(13))
+	gasPrice.Div(gasPrice, big.NewInt(10))
 
 	// Estimate gas limit
 	msg := ethereum.CallMsg{
@@ -104,13 +106,12 @@ func GetTransactionSenderByCoboMpcTransactionSender(client bind.ContractBackend,
 
 // SendEthereumTransaction sends an Ethereum transaction using Cobo MPC wallet
 func (s *CoboMpcTransactionSender) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
+	// Get gas price and increase by 30% to improve transaction inclusion speed
 	gasPrice, err := s.client.SuggestGasPrice(context.Background())
 	if err != nil {
 		return common.Hash{}, err
 	}
-
-	// Increase gas price by 50%
-	gasPrice.Mul(gasPrice, big.NewInt(15))
+	gasPrice.Mul(gasPrice, big.NewInt(13))
 	gasPrice.Div(gasPrice, big.NewInt(10))
 
 	gasLimit, err := s.client.EstimateGas(context.Background(), ethereum.CallMsg{

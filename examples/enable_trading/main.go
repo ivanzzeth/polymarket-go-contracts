@@ -61,6 +61,6 @@ func main() {
 	log.Printf("Transaction hashes:")
 	for i, txHash := range txHashes {
 		log.Printf("  %d. %s", i+1, txHash.Hex())
-		log.Printf("     View on Polygonscan: https://polygonscan.com/tx/%s", txHash.Hex())
+		log.Printf("     View transaction: https://evm-explorer.web3gate.xyz/evm/137/tx/%s", txHash.Hex())
 	}
 }

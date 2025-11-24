@@ -468,7 +468,10 @@ func (b *ContractInterface) EnableTrading(ctx context.Context) ([]common.Hash, e
 	}
 }
 
-func (b *ContractInterface) Redeem(ctx context.Context, conditionId [32]byte, indexSets []*big.Int) (common.Hash, error) {
+func (b *ContractInterface) Redeem(ctx context.Context, conditionId [32]byte) (common.Hash, error) {
+	// For Polymarket binary markets, indexSets is always [1, 2] representing Yes/No outcomes
+	indexSets := []*big.Int{big.NewInt(1), big.NewInt(2)}
+
 	switch b.signatureType {
 	case SignatureTypePolyGnosisSafe:
 		return b.RedeemPositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, indexSets)
@@ -490,7 +493,10 @@ func (b *ContractInterface) RedeemNegRisk(ctx context.Context, conditionId [32]b
 	}
 }
 
-func (b *ContractInterface) Split(ctx context.Context, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+func (b *ContractInterface) Split(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	// For Polymarket binary markets, partition is always [1, 2] representing Yes/No outcomes
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+
 	switch b.signatureType {
 	case SignatureTypePolyGnosisSafe:
 		return b.SplitPositionForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)
@@ -501,7 +507,10 @@ func (b *ContractInterface) Split(ctx context.Context, conditionId [32]byte, par
 	}
 }
 
-func (b *ContractInterface) Merge(ctx context.Context, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+func (b *ContractInterface) Merge(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	// For Polymarket binary markets, partition is always [1, 2] representing Yes/No outcomes
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+
 	switch b.signatureType {
 	case SignatureTypePolyGnosisSafe:
 		return b.MergePositionsForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, partition, amount)

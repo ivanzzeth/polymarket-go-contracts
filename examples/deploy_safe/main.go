@@ -77,5 +77,5 @@ func main() {
 	}
 
 	log.Println("\nYou can now use this Safe address for multi-signature operations.")
-	log.Printf("View on Polygonscan: https://polygonscan.com/address/%s", safeProxy.Hex())
+	log.Printf("View Safe: https://evm-explorer.web3gate.xyz/evm/137/address/%s", safeProxy.Hex())
 }

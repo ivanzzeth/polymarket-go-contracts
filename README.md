@@ -9,6 +9,7 @@ A Go library for interacting with Polymarket smart contracts on Polygon network.
 - 🏭 Safe deployment and management
 - 🔌 MPC wallet integration (Cobo MPC)
 - ⚡ Built on go-ethereum
+- 🚀 Enhanced transaction inclusion speed (1.3x gas price multiplier)
 
 ## Installation
 
@@ -132,6 +133,10 @@ func main() {
 RPC_URL=https://polygon-rpc.com
 PRIVATE_KEY=your_private_key_hex
 
+# Required for split/merge examples
+CONDITION_ID=0x... # The condition ID from Polymarket
+AMOUNT=100         # Amount in USDC (for split) or tokens (for merge)
+
 # Required for MPC examples
 COBO_PRIVATE_KEY=your_cobo_api_private_key
 COBO_WALLET_ID=your_cobo_wallet_id
@@ -159,6 +164,14 @@ For complete, runnable examples, see the [`examples/`](./examples) directory:
   - Configures all necessary token approvals through Safe
   - Owner signs transactions via EIP-712
 
+- **[`safe_split_position`](./examples/safe_split_position)** - Split USDC into conditional tokens via Safe
+  - Locks USDC collateral and receives outcome tokens
+  - Demonstrates position creation through Safe
+
+- **[`safe_merge_positions`](./examples/safe_merge_positions)** - Merge conditional tokens back to USDC via Safe
+  - Burns all outcome tokens to unlock USDC
+  - Requires holding complete set of outcome tokens
+
 ### Safe Examples with MPC (Cobo)
 
 - **[`deploy_safe_for_mpc`](./examples/deploy_safe_for_mpc)** - Deploy Safe using Cobo MPC wallet
@@ -171,6 +184,8 @@ For complete, runnable examples, see the [`examples/`](./examples) directory:
 
 ## Running Examples
 
+### Basic Example (Enable Trading)
+
 ```bash
 # Navigate to an example directory
 cd examples/enable_trading
@@ -180,6 +195,29 @@ export RPC_URL=https://polygon-rpc.com
 export PRIVATE_KEY=your_private_key_hex
 
 # Run the example
+go run main.go
+```
+
+### Split/Merge Examples
+
+```bash
+# Navigate to split position example
+cd examples/safe_split_position
+
+# Set environment variables
+export RPC_URL=https://polygon-rpc.com
+export PRIVATE_KEY=your_private_key_hex
+export CONDITION_ID=0x1234...  # Get from Polymarket market
+export AMOUNT=100               # 100 USDC to split
+
+# Run split
+go run main.go
+
+# Navigate to merge positions example
+cd ../safe_merge_positions
+
+# Set same environment variables
+# Run merge (requires holding all outcome tokens)
 go run main.go
 ```
 
@@ -197,26 +235,26 @@ txHashes, err := polymarketInterface.EnableTrading(ctx)
 
 ### Split Position
 
-Split collateral tokens into conditional tokens:
+Split collateral tokens into conditional tokens. The partition parameter is automatically set to [1, 2] for Polymarket's binary markets (Yes/No outcomes):
 
 ```go
-txHash, err := polymarketInterface.SplitPosition(ctx, conditionId, amount)
+txHash, err := polymarketInterface.Split(ctx, conditionId, amount)
 ```
 
 ### Merge Positions
 
-Merge conditional tokens back to collateral:
+Merge conditional tokens back to collateral. The partition parameter is automatically set to [1, 2] for Polymarket's binary markets:
 
 ```go
-txHash, err := polymarketInterface.MergePositions(ctx, conditionId, amount)
+txHash, err := polymarketInterface.Merge(ctx, conditionId, amount)
 ```
 
 ### Redeem Positions
 
-Redeem conditional tokens after market resolution:
+Redeem conditional tokens after market resolution. The indexSets parameter is automatically set to [1, 2] for Polymarket's binary markets:
 
 ```go
-txHash, err := polymarketInterface.RedeemPositions(ctx, conditionId, indexSets)
+txHash, err := polymarketInterface.Redeem(ctx, conditionId)
 ```
 
 ## Architecture
@@ -249,6 +287,7 @@ Pre-configured contract addresses are available via `GetContractConfig()`.
 - **Environment Variables**: Use `.env` files or secure secret management
 - **Safe Wallets**: Recommended for institutional use and large funds
 - **MPC Wallets**: Provide hardware-backed security for enterprise applications
+- **Transaction Inclusion**: The library automatically applies a 1.3x multiplier to suggested gas prices to improve transaction inclusion speed on Polygon network
 - **Gas Estimation**: Always verify gas costs before mainnet deployment
 
 ## License
