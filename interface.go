@@ -260,6 +260,26 @@ func (b *ContractInterface) GetClient() ethclient.EthClientInterface {
 	return b.client
 }
 
+// GetSignatureType returns the signature type used by this interface
+func (b *ContractInterface) GetSignatureType() SignatureType {
+	return b.signatureType
+}
+
+// GetTxSender returns the transaction sender
+func (b *ContractInterface) GetTxSender() sender.TransactionSender {
+	return b.getTxSender()
+}
+
+// GetSafeTradingSigner returns the Safe trading signer
+func (b *ContractInterface) GetSafeTradingSigner() signer.SafeTradingSigner {
+	return b.safeTradingSigner
+}
+
+// GetEOATradingSigner returns the EOA trading signer
+func (b *ContractInterface) GetEOATradingSigner() signer.EOATradingSigner {
+	return b.eoaTradingSigner
+}
+
 func (b *ContractInterface) getTxSender() sender.TransactionSender {
 	if b.txSender != nil {
 		return b.txSender
