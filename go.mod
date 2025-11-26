@@ -6,7 +6,7 @@ require (
 	github.com/CoboGlobal/cobo-waas2-go-sdk v1.25.0
 	github.com/ethereum/go-ethereum v1.16.1
 	github.com/ivanzzeth/ethclient v0.1.35
-	github.com/ivanzzeth/ethsig v0.0.1
+	github.com/ivanzzeth/ethsig v0.1.0
 )
 
 require (
