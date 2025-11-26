@@ -1277,9 +1277,7 @@ func BuildCreateProxyTypedData(chainID *big.Int, safeFactory, paymentToken commo
 		},
 		PrimaryType: "CreateProxy",
 		Domain: eip712.TypedDataDomain{
-			Name: constants.EIP712_GNOSIS_SAFE_FACTORY_DOMAIN_NAME,
-			// NO VErSION
-			// Version: constants.EIP712_GNOSIS_SAFE_FACTORY_DOMAIN_VERSION,
+			Name:              constants.EIP712_GNOSIS_SAFE_FACTORY_DOMAIN_NAME,
 			ChainId:           chainID.String(),
 			VerifyingContract: strings.ToLower(safeFactory.Hex()),
 		},
