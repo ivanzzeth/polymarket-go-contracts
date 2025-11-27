@@ -310,48 +310,55 @@ func (b *ContractInterface) getEOATradingSigner() signer.EOATradingSigner {
 
 // CheckBalanceAndAllowance checks the USDC balance and all allowances for the given address
 func (b *ContractInterface) CheckBalanceAndAllowance(ctx context.Context, address common.Address) (*BalanceAllowanceInfo, error) {
+	return b.CheckBalanceAndAllowanceAtBlock(ctx, address, nil)
+}
+
+// CheckBalanceAndAllowanceAtBlock checks the USDC balance and all allowances for the given address at a specific block
+// If blockNumber is nil, it uses the latest block
+func (b *ContractInterface) CheckBalanceAndAllowanceAtBlock(ctx context.Context, address common.Address, blockNumber *big.Int) (*BalanceAllowanceInfo, error) {
 	info := &BalanceAllowanceInfo{}
+	callOpts := &bind.CallOpts{Context: ctx, BlockNumber: blockNumber}
 
 	// Check USDC balance
-	balance, err := b.collateralContract.BalanceOf(&bind.CallOpts{Context: ctx}, address)
+	balance, err := b.collateralContract.BalanceOf(callOpts, address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get USDC balance: %w", err)
 	}
 	info.Balance = balance
 
 	// Check USDC allowances
-	allowanceExchange, err := b.collateralContract.Allowance(&bind.CallOpts{Context: ctx}, address, b.contractConfig.Exchange)
+	allowanceExchange, err := b.collateralContract.Allowance(callOpts, address, b.contractConfig.Exchange)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get USDC allowance for Exchange: %w", err)
 	}
 	info.AllowanceExchange = allowanceExchange
 
-	allowanceNegRiskAdapter, err := b.collateralContract.Allowance(&bind.CallOpts{Context: ctx}, address, b.contractConfig.NegRiskAdapter)
+	allowanceNegRiskAdapter, err := b.collateralContract.Allowance(callOpts, address, b.contractConfig.NegRiskAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get USDC allowance for NegRiskAdapter: %w", err)
 	}
 	info.AllowanceNegRiskAdapter = allowanceNegRiskAdapter
 
-	allowanceNegRiskExchange, err := b.collateralContract.Allowance(&bind.CallOpts{Context: ctx}, address, b.contractConfig.NegRiskExchange)
+	allowanceNegRiskExchange, err := b.collateralContract.Allowance(callOpts, address, b.contractConfig.NegRiskExchange)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get USDC allowance for NegRiskExchange: %w", err)
 	}
 	info.AllowanceNegRiskExchange = allowanceNegRiskExchange
 
 	// Check CTF approvals
-	ctfApprovedExchange, err := b.conditionalTokensContract.IsApprovedForAll(&bind.CallOpts{Context: ctx}, address, b.contractConfig.Exchange)
+	ctfApprovedExchange, err := b.conditionalTokensContract.IsApprovedForAll(callOpts, address, b.contractConfig.Exchange)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check CTF approval for Exchange: %w", err)
 	}
 	info.CTFApprovedExchange = ctfApprovedExchange
 
-	ctfApprovedNegRiskAdapter, err := b.conditionalTokensContract.IsApprovedForAll(&bind.CallOpts{Context: ctx}, address, b.contractConfig.NegRiskAdapter)
+	ctfApprovedNegRiskAdapter, err := b.conditionalTokensContract.IsApprovedForAll(callOpts, address, b.contractConfig.NegRiskAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check CTF approval for NegRiskAdapter: %w", err)
 	}
 	info.CTFApprovedNegRiskAdapter = ctfApprovedNegRiskAdapter
 
-	ctfApprovedNegRiskExchange, err := b.conditionalTokensContract.IsApprovedForAll(&bind.CallOpts{Context: ctx}, address, b.contractConfig.NegRiskExchange)
+	ctfApprovedNegRiskExchange, err := b.conditionalTokensContract.IsApprovedForAll(callOpts, address, b.contractConfig.NegRiskExchange)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check CTF approval for NegRiskExchange: %w", err)
 	}
