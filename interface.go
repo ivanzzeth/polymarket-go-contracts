@@ -685,6 +685,34 @@ func (b *ContractInterface) ExecuteTransactionBySafeAndSingleSigner(safeSigner s
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to sign Safe transaction: %w", err)
 	}
+	// fmt.Printf("✅ Signature generated: %x (length: %d bytes)\n", signature, len(signature))
+
+	// Verify signature before executing
+	// fmt.Println("🔍 Verifying signature before executing transaction...")
+	safeTxHash, _, err := eip712.TypedDataAndHash(typedData)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to compute typed data hash: %w", err)
+	}
+	// fmt.Printf("   Safe transaction hash: %x\n", safeTxHash)
+
+	safeL2, err := b.GetGnosisSafeL2(safeAddr)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get GnosisSafeL2 contract: %w", err)
+	}
+
+	// Encode transaction data for signature verification
+	encodedTxData, err := safeL2.EncodeTransactionData(nil, to, value, data, uint8(operation), safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, nonce)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to encode transaction data: %w", err)
+	}
+	// fmt.Printf("   Encoded transaction data length: %d bytes\n", len(encodedTxData))
+
+	// Verify signature using Safe contract's checkSignatures method
+	err = safeL2.CheckSignatures(nil, common.BytesToHash(safeTxHash), encodedTxData, signature)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("signature verification failed: %w", err)
+	}
+	// fmt.Println("✅ Signature verification passed")
 
 	// Execute the transaction with the signature
 	return b.ExecuteTransactionBySafe(safeSigner, safeAddr, to, value, data, operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, signature)
@@ -713,7 +741,13 @@ func (b *ContractInterface) ExecuteTransactionBySafe(txSender sender.Transaction
 		return common.Hash{}, fmt.Errorf("failed to pack execTransaction: %w", err)
 	}
 
-	return txSender.SendEthereumTransaction(safeAddr, execTransactionData, big.NewInt(0))
+	txHash, err := txSender.SendEthereumTransaction(safeAddr, execTransactionData, big.NewInt(0))
+	if err != nil {
+		if strings.Contains(err.Error(), "GS010") {
+			return common.Hash{}, fmt.Errorf("GS010 but signature is valid, considering not enough gas token")
+		}
+	}
+	return txHash, nil
 }
 
 // EnableTradingForSafe enables trading for a Safe wallet by setting all required allowances
@@ -736,6 +770,20 @@ func (b *ContractInterface) EnableTradingForSafe(
 		return nil, fmt.Errorf("failed to check balance and allowance: %w", err)
 	}
 
+	// Print current authorization status
+	fmt.Println("\n=== Current Authorization Status ===")
+	fmt.Printf("Safe Address: %s\n", safeAddr.Hex())
+	fmt.Printf("USDC Balance: %s\n", formatUSDC(info.Balance))
+	fmt.Println("\nUSDC Allowances:")
+	fmt.Printf("  USDC → Exchange: %s (allowance: %s)\n", checkmark(info.AllowanceExchange.Cmp(big.NewInt(0)) > 0), info.AllowanceExchange.String())
+	fmt.Printf("  USDC → NegRiskAdapter: %s (allowance: %s)\n", checkmark(info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) > 0), info.AllowanceNegRiskAdapter.String())
+	fmt.Printf("  USDC → NegRiskExchange: %s (allowance: %s)\n", checkmark(info.AllowanceNegRiskExchange.Cmp(big.NewInt(0)) > 0), info.AllowanceNegRiskExchange.String())
+	fmt.Println("\nCTF Approvals:")
+	fmt.Printf("  CTF → Exchange: %s\n", checkmark(info.CTFApprovedExchange))
+	fmt.Printf("  CTF → NegRiskAdapter: %s\n", checkmark(info.CTFApprovedNegRiskAdapter))
+	fmt.Printf("  CTF → NegRiskExchange: %s\n", checkmark(info.CTFApprovedNegRiskExchange))
+	fmt.Println()
+
 	// Maximum allowance for ERC20 approvals
 	maxAllowance := new(big.Int)
 	maxAllowance.SetString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
@@ -754,6 +802,7 @@ func (b *ContractInterface) EnableTradingForSafe(
 
 	// Approve USDC for all contracts if needed
 	if info.AllowanceExchange.Cmp(big.NewInt(0)) == 0 {
+		fmt.Printf("⚠️  Setting USDC → Exchange approval...\n")
 		approveData, err := erc20ABI.Pack("approve", b.contractConfig.Exchange, maxAllowance)
 		if err != nil {
 			return nil, fmt.Errorf("failed to pack approve data for Exchange: %w", err)
@@ -768,9 +817,13 @@ func (b *ContractInterface) EnableTradingForSafe(
 			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → Exchange approval: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ USDC → Exchange approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ USDC → Exchange already approved\n")
 	}
 
 	if info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) == 0 {
+		fmt.Printf("⚠️  Setting USDC → NegRiskAdapter approval...\n")
 		approveData, err := erc20ABI.Pack("approve", b.contractConfig.NegRiskAdapter, maxAllowance)
 		if err != nil {
 			return nil, fmt.Errorf("failed to pack approve data for NegRiskAdapter: %w", err)
@@ -785,9 +838,13 @@ func (b *ContractInterface) EnableTradingForSafe(
 			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → NegRiskAdapter approval: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ USDC → NegRiskAdapter approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ USDC → NegRiskAdapter already approved\n")
 	}
 
 	if info.AllowanceNegRiskExchange.Cmp(big.NewInt(0)) == 0 {
+		fmt.Printf("⚠️  Setting USDC → NegRiskExchange approval...\n")
 		approveData, err := erc20ABI.Pack("approve", b.contractConfig.NegRiskExchange, maxAllowance)
 		if err != nil {
 			return nil, fmt.Errorf("failed to pack approve data for NegRiskExchange: %w", err)
@@ -802,10 +859,14 @@ func (b *ContractInterface) EnableTradingForSafe(
 			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → NegRiskExchange approval: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ USDC → NegRiskExchange approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ USDC → NegRiskExchange already approved\n")
 	}
 
 	// Approve CTF for all contracts if needed
 	if !info.CTFApprovedExchange {
+		fmt.Printf("⚠️  Setting CTF → Exchange approval...\n")
 		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.Exchange, true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to pack setApprovalForAll data for Exchange: %w", err)
@@ -820,9 +881,13 @@ func (b *ContractInterface) EnableTradingForSafe(
 			return nil, fmt.Errorf("failed to execute Safe transaction for CTF → Exchange approval: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ CTF → Exchange approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ CTF → Exchange already approved\n")
 	}
 
 	if !info.CTFApprovedNegRiskAdapter {
+		fmt.Printf("⚠️  Setting CTF → NegRiskAdapter approval...\n")
 		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.NegRiskAdapter, true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to pack setApprovalForAll data for NegRiskAdapter: %w", err)
@@ -837,9 +902,13 @@ func (b *ContractInterface) EnableTradingForSafe(
 			return nil, fmt.Errorf("failed to execute Safe transaction for CTF → NegRiskAdapter approval: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ CTF → NegRiskAdapter approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ CTF → NegRiskAdapter already approved\n")
 	}
 
 	if !info.CTFApprovedNegRiskExchange {
+		fmt.Printf("⚠️  Setting CTF → NegRiskExchange approval...\n")
 		setApprovalData, err := ctfABI.Pack("setApprovalForAll", b.contractConfig.NegRiskExchange, true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to pack setApprovalForAll data for NegRiskExchange: %w", err)
@@ -854,6 +923,15 @@ func (b *ContractInterface) EnableTradingForSafe(
 			return nil, fmt.Errorf("failed to execute Safe transaction for CTF → NegRiskExchange approval: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ CTF → NegRiskExchange approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ CTF → NegRiskExchange already approved\n")
+	}
+
+	if len(txHashes) == 0 {
+		fmt.Println("\n✅ All authorizations are already set up. No transactions needed.")
+	} else {
+		fmt.Printf("\n✅ Enabled trading: %d approval transaction(s) submitted\n", len(txHashes))
 	}
 
 	return txHashes, nil
