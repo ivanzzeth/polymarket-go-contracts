@@ -548,6 +548,28 @@ func (b *ContractInterface) Merge(ctx context.Context, conditionId [32]byte, amo
 	}
 }
 
+func (b *ContractInterface) SplitNegRisk(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.SplitPositionNegRiskForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, amount)
+	case SignatureTypeEOA:
+		return b.SplitPositionNegRiskForEOA(ctx, b.getEOATradingSigner(), conditionId, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
+}
+
+func (b *ContractInterface) MergeNegRisk(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	switch b.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		return b.MergePositionsNegRiskForSafe(ctx, b.getSafeTradingSigner(), b.chainID, conditionId, amount)
+	case SignatureTypeEOA:
+		return b.MergePositionsNegRiskForEOA(ctx, b.getEOATradingSigner(), conditionId, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", b.signatureType)
+	}
+}
+
 func (b *ContractInterface) DeploySafeBySender(txSender sender.TransactionSender, signer ethsig.TypedDataSigner) (safeProxy common.Address, txHash common.Hash, err error) {
 	zeroAddr := common.Address{}
 	paymentToken := zeroAddr
@@ -1213,6 +1235,140 @@ func (b *ContractInterface) MergePositionsForSafe(
 	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
 		safeSigner, chainID, safeAddr,
 		b.contractConfig.ConditionalTokens,
+		big.NewInt(0), // value
+		calldata,
+		SafeOperationCall,
+		big.NewInt(0), // safeTxGas will be auto-estimated
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// SplitPositionNegRiskForEOA splits NegRisk market positions using EOA
+func (b *ContractInterface) SplitPositionNegRiskForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	conditionId [32]byte,
+	amount *big.Int,
+) (common.Hash, error) {
+	txSender := b.getTxSender()
+
+	// Prepare calldata for splitPosition0 (NegRisk)
+	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+	}
+	calldata, err := parsedABI.Pack("splitPosition0", conditionId, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack splitPosition0 calldata: %w", err)
+	}
+
+	// Send transaction
+	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.NegRiskAdapter, calldata, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send NegRisk split transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// MergePositionsNegRiskForEOA merges NegRisk market positions using EOA
+func (b *ContractInterface) MergePositionsNegRiskForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	conditionId [32]byte,
+	amount *big.Int,
+) (common.Hash, error) {
+	txSender := b.getTxSender()
+
+	// Prepare calldata for mergePositions0 (NegRisk)
+	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+	}
+	calldata, err := parsedABI.Pack("mergePositions0", conditionId, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack mergePositions0 calldata: %w", err)
+	}
+
+	// Send transaction
+	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.NegRiskAdapter, calldata, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send NegRisk merge transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// SplitPositionNegRiskForSafe splits NegRisk market positions using Safe
+func (b *ContractInterface) SplitPositionNegRiskForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	conditionId [32]byte,
+	amount *big.Int,
+) (common.Hash, error) {
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
+
+	// Prepare calldata for splitPosition0 (NegRisk)
+	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+	}
+	calldata, err := parsedABI.Pack("splitPosition0", conditionId, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack splitPosition0 calldata: %w", err)
+	}
+
+	// Execute Safe transaction
+	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
+		safeSigner, chainID, safeAddr,
+		b.contractConfig.NegRiskAdapter,
+		big.NewInt(0), // value
+		calldata,
+		SafeOperationCall,
+		big.NewInt(0), // safeTxGas will be auto-estimated
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// MergePositionsNegRiskForSafe merges NegRisk market positions using Safe
+func (b *ContractInterface) MergePositionsNegRiskForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	conditionId [32]byte,
+	amount *big.Int,
+) (common.Hash, error) {
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
+
+	// Prepare calldata for mergePositions0 (NegRisk)
+	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+	}
+	calldata, err := parsedABI.Pack("mergePositions0", conditionId, amount)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack mergePositions0 calldata: %w", err)
+	}
+
+	// Execute Safe transaction
+	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
+		safeSigner, chainID, safeAddr,
+		b.contractConfig.NegRiskAdapter,
 		big.NewInt(0), // value
 		calldata,
 		SafeOperationCall,

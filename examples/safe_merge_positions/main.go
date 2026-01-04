@@ -75,28 +75,68 @@ func main() {
 		log.Fatal("CONDITION_ID environment variable is required")
 	}
 	conditionId := common.HexToHash(conditionIdHex)
+	amount := new(big.Int)
 
 	amountStr := os.Getenv("AMOUNT")
-	if amountStr == "" {
-		log.Fatal("AMOUNT environment variable is required (in conditional tokens, e.g., '100')")
+	if amountStr != "" {
+		var ok bool
+		amount, ok = amount.SetString(amountStr, 10)
+		if !ok {
+			log.Fatalf("Invalid AMOUNT value: %s", amountStr)
+		}
+		// Convert to token units (6 decimals for CTF tokens)
+		tokenDecimals := new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)
+		amount.Mul(amount, tokenDecimals)
 	}
-	amount := new(big.Int)
-	amount, ok := amount.SetString(amountStr, 10)
-	if !ok {
-		log.Fatalf("Invalid AMOUNT value: %s", amountStr)
-	}
-
-	// Convert to token units (6 decimals for CTF tokens)
-	tokenDecimals := new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)
-	amount.Mul(amount, tokenDecimals)
 
 	// Set context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
+	ctf := polymarketInterface.GetConditionalTokens()
+	collectionId, err := ctf.GetCollectionId(nil, [32]byte{}, conditionId, big.NewInt(1))
+	if err != nil {
+		log.Fatalf("Failed to query collectionID: %v", err)
+	}
+
+	collectionId1, err := ctf.GetCollectionId(nil, [32]byte{}, conditionId, big.NewInt(2))
+	if err != nil {
+		log.Fatalf("Failed to query collectionID: %v", err)
+	}
+
+	posId, err := ctf.GetPositionId(nil, polymarketInterface.GetConfig().Collateral, collectionId)
+	if err != nil {
+		log.Fatalf("Failed to query positionID: %v", err)
+	}
+	posId1, err := ctf.GetPositionId(nil, polymarketInterface.GetConfig().Collateral, collectionId1)
+	if err != nil {
+		log.Fatalf("Failed to query positionID: %v", err)
+	}
+
+	balance, err := ctf.BalanceOf(nil, safeAddr, posId)
+	if err != nil {
+		log.Fatalf("Failed to query balance0: %v", err)
+	}
+	balance1, err := ctf.BalanceOf(nil, safeAddr, posId1)
+	if err != nil {
+		log.Fatalf("Failed to query balance0: %v", err)
+	}
+
+	if amount.Cmp(common.Big0) == 0 {
+		amount = balance
+	}
+
 	log.Println("\n=== Merging Positions via Safe ===")
 	log.Printf("Condition ID: %s", conditionId.Hex())
 	log.Printf("Amount: %s tokens", amountStr)
+	log.Printf("EOA: %s", eoaAddress)
+	log.Printf("Funder: %s", safeAddr)
+	log.Printf("posId: %s", posId)
+	log.Printf("posId1: %s", posId1)
+
+	log.Printf("Position Balance: %v", balance.String())
+	log.Printf("Position Balance1: %v", balance1.String())
+
 	log.Println("\nThis will merge your conditional tokens back into USDC.")
 	log.Println("⚠️  Note: You must hold ALL outcome tokens for this market to merge successfully!")
 

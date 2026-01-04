@@ -101,6 +101,24 @@ func main() {
 	log.Println("Binary market partition [1, 2] for Yes/No outcomes is handled automatically.")
 
 	// Split position through Safe
+	ctf := polymarketInterface.GetConditionalTokens()
+	collectionId, err := ctf.GetCollectionId(nil, [32]byte{}, conditionId, big.NewInt(0))
+	if err != nil {
+		log.Fatalf("Failed to query collectionID: %v", err)
+	}
+
+	posId, err := ctf.GetPositionId(nil, polymarketInterface.GetConfig().Collateral, collectionId)
+	if err != nil {
+		log.Fatalf("Failed to query positionID: %v", err)
+	}
+
+	balance, err := ctf.BalanceOf(nil, safeAddr, posId)
+	if err != nil {
+		log.Fatalf("Failed to query balance0: %v", err)
+	}
+
+	log.Printf("Balance: %v", balance.String())
+
 	txHash, err := polymarketInterface.Split(ctx, conditionId, amount)
 	if err != nil {
 		log.Fatalf("Failed to split position: %v", err)
