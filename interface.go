@@ -746,6 +746,7 @@ func (b *ContractInterface) ExecuteTransactionBySafe(txSender sender.Transaction
 		if strings.Contains(err.Error(), "GS010") {
 			return common.Hash{}, fmt.Errorf("GS010 but signature is valid, considering not enough gas token")
 		}
+		return common.Hash{}, fmt.Errorf("failed to send Safe transaction: %w", err)
 	}
 	return txHash, nil
 }
