@@ -33,6 +33,7 @@ import (
 type BalanceAllowanceInfo struct {
 	Balance                    *big.Int
 	AllowanceExchange          *big.Int
+	AllowanceConditionalTokens *big.Int
 	AllowanceNegRiskAdapter    *big.Int
 	AllowanceNegRiskExchange   *big.Int
 	CTFApprovedExchange        bool
@@ -333,6 +334,12 @@ func (b *ContractInterface) CheckBalanceAndAllowanceAtBlock(ctx context.Context,
 	}
 	info.AllowanceExchange = allowanceExchange
 
+	allowanceConditionalTokens, err := b.collateralContract.Allowance(callOpts, address, b.contractConfig.ConditionalTokens)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get USDC allowance for ConditionalTokens: %w", err)
+	}
+	info.AllowanceConditionalTokens = allowanceConditionalTokens
+
 	allowanceNegRiskAdapter, err := b.collateralContract.Allowance(callOpts, address, b.contractConfig.NegRiskAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get USDC allowance for NegRiskAdapter: %w", err)
@@ -382,6 +389,7 @@ func (b *ContractInterface) PrintBalanceAndAllowance(ctx context.Context, addres
 	// Print Allowances
 	fmt.Println("Allowances:")
 	fmt.Printf("  USDC → Exchange: %s\n", checkmark(info.AllowanceExchange.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  USDC → ConditionalTokens: %s\n", checkmark(info.AllowanceConditionalTokens.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  USDC → NegRiskAdapter: %s\n", checkmark(info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  USDC → NegRiskExchange: %s\n", checkmark(info.AllowanceNegRiskExchange.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  CTF → Exchange: %s\n", checkmark(info.CTFApprovedExchange))
@@ -777,6 +785,7 @@ func (b *ContractInterface) EnableTradingForSafe(
 	fmt.Printf("USDC Balance: %s\n", formatUSDC(info.Balance))
 	fmt.Println("\nUSDC Allowances:")
 	fmt.Printf("  USDC → Exchange: %s (allowance: %s)\n", checkmark(info.AllowanceExchange.Cmp(big.NewInt(0)) > 0), info.AllowanceExchange.String())
+	fmt.Printf("  USDC → ConditionalTokens: %s (allowance: %s)\n", checkmark(info.AllowanceConditionalTokens.Cmp(big.NewInt(0)) > 0), info.AllowanceConditionalTokens.String())
 	fmt.Printf("  USDC → NegRiskAdapter: %s (allowance: %s)\n", checkmark(info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) > 0), info.AllowanceNegRiskAdapter.String())
 	fmt.Printf("  USDC → NegRiskExchange: %s (allowance: %s)\n", checkmark(info.AllowanceNegRiskExchange.Cmp(big.NewInt(0)) > 0), info.AllowanceNegRiskExchange.String())
 	fmt.Println("\nCTF Approvals:")
@@ -821,6 +830,28 @@ func (b *ContractInterface) EnableTradingForSafe(
 		fmt.Printf("✅ USDC → Exchange approval transaction: %s\n", txHash.Hex())
 	} else {
 		fmt.Printf("✅ USDC → Exchange already approved\n")
+	}
+
+	// Approve USDC for ConditionalTokens (needed for split/merge operations)
+	if info.AllowanceConditionalTokens.Cmp(big.NewInt(0)) == 0 {
+		fmt.Printf("⚠️  Setting USDC → ConditionalTokens approval...\n")
+		approveData, err := erc20ABI.Pack("approve", b.contractConfig.ConditionalTokens, maxAllowance)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack approve data for ConditionalTokens: %w", err)
+		}
+
+		txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
+			safeSigner, chainID, safeAddr,
+			b.contractConfig.Collateral, big.NewInt(0), approveData,
+			SafeOperationCall, big.NewInt(0),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute Safe transaction for USDC → ConditionalTokens approval: %w", err)
+		}
+		txHashes = append(txHashes, txHash)
+		fmt.Printf("✅ USDC → ConditionalTokens approval transaction: %s\n", txHash.Hex())
+	} else {
+		fmt.Printf("✅ USDC → ConditionalTokens already approved\n")
 	}
 
 	if info.AllowanceNegRiskAdapter.Cmp(big.NewInt(0)) == 0 {
