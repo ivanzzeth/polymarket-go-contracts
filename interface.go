@@ -845,6 +845,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ USDC → Exchange approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ USDC → Exchange already approved\n")
 	}
@@ -867,6 +870,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ USDC → ConditionalTokens approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ USDC → ConditionalTokens already approved\n")
 	}
@@ -888,6 +894,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ USDC → NegRiskAdapter approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ USDC → NegRiskAdapter already approved\n")
 	}
@@ -909,6 +918,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ USDC → NegRiskExchange approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ USDC → NegRiskExchange already approved\n")
 	}
@@ -931,6 +943,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ CTF → Exchange approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ CTF → Exchange already approved\n")
 	}
@@ -952,6 +967,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ CTF → NegRiskAdapter approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ CTF → NegRiskAdapter already approved\n")
 	}
@@ -973,6 +991,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		}
 		txHashes = append(txHashes, txHash)
 		fmt.Printf("✅ CTF → NegRiskExchange approval transaction: %s\n", txHash.Hex())
+		if err := b.waitTxReceipts([]common.Hash{txHash}, 3, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	} else {
 		fmt.Printf("✅ CTF → NegRiskExchange already approved\n")
 	}
@@ -980,10 +1001,7 @@ func (b *ContractInterface) EnableTradingForSafe(
 	if len(txHashes) == 0 {
 		fmt.Println("\n✅ All authorizations are already set up. No transactions needed.")
 	} else {
-		fmt.Printf("\n✅ Enabled trading: %d approval transaction(s) submitted\n", len(txHashes))
-		if err := b.waitTxReceipts(txHashes, 1, 1*time.Minute); err != nil {
-			return txHashes, err
-		}
+		fmt.Printf("\n✅ Enabled trading: %d approval transaction(s) submitted and confirmed\n", len(txHashes))
 	}
 
 	return txHashes, nil
@@ -1097,7 +1115,7 @@ func (b *ContractInterface) EnableTradingForEOA(
 	}
 
 	if len(txHashes) > 0 {
-		if err := b.waitTxReceipts(txHashes, 1, 1*time.Minute); err != nil {
+		if err := b.waitTxReceipts(txHashes, 3, 1*time.Minute); err != nil {
 			return txHashes, err
 		}
 	}
