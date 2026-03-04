@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -259,6 +260,22 @@ func (b *ContractInterface) GetConfig() *ContractConfig {
 // GetClient returns the Ethereum client
 func (b *ContractInterface) GetClient() ethclient.EthClientInterface {
 	return b.client
+}
+
+// waitTxReceipts waits for all tx hashes to be confirmed using the underlying ethclient.Client.WaitTxReceipt.
+// If client is not *ethclient.Client, returns nil (no wait, caller assumes responsibility).
+func (b *ContractInterface) waitTxReceipts(txHashes []common.Hash, confirmations uint64, timeout time.Duration) error {
+	client, ok := b.client.(*ethclient.Client)
+	if !ok {
+		return nil
+	}
+	for _, h := range txHashes {
+		_, confirmed := client.WaitTxReceipt(h, confirmations, timeout)
+		if !confirmed {
+			return fmt.Errorf("tx %s not confirmed after %v", h.Hex(), timeout)
+		}
+	}
+	return nil
 }
 
 // GetSignatureType returns the signature type used by this interface
@@ -964,6 +981,9 @@ func (b *ContractInterface) EnableTradingForSafe(
 		fmt.Println("\n✅ All authorizations are already set up. No transactions needed.")
 	} else {
 		fmt.Printf("\n✅ Enabled trading: %d approval transaction(s) submitted\n", len(txHashes))
+		if err := b.waitTxReceipts(txHashes, 1, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	}
 
 	return txHashes, nil
@@ -1074,6 +1094,12 @@ func (b *ContractInterface) EnableTradingForEOA(
 			return nil, fmt.Errorf("failed to send CTF → NegRiskExchange approval transaction: %w", err)
 		}
 		txHashes = append(txHashes, txHash)
+	}
+
+	if len(txHashes) > 0 {
+		if err := b.waitTxReceipts(txHashes, 1, 1*time.Minute); err != nil {
+			return txHashes, err
+		}
 	}
 
 	return txHashes, nil
