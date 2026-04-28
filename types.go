@@ -19,3 +19,10 @@ const (
 
 const COLLATERAL_TOKEN_DECIMALS = 6
 const CONDITIONAL_TOKEN_DECIMALS = 6
+
+type CollateralType int
+
+const (
+	CollateralUSDCE CollateralType = iota // V1: USDC.e directly to CTF
+	CollateralPUSD                        // V2: pUSD via adapter
+)

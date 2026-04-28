@@ -50,6 +50,7 @@ type ContractInterface struct {
 	eoaTradingSigner  signer.EOATradingSigner
 	safeTradingSigner signer.SafeTradingSigner
 	txSender          sender.TransactionSender
+	executor          *txExecutor
 
 	collateralContract        *erc20.Erc20
 	conditionalTokensContract *conditional_tokens.ConditionalTokens
@@ -187,7 +188,7 @@ func NewContractInterface(
 		}
 	}
 
-	return &ContractInterface{
+	ci := &ContractInterface{
 		chainID:           chainID,
 		client:            client,
 		contractConfig:    defaultOptions.ContractConfig,
@@ -204,7 +205,16 @@ func NewContractInterface(
 		negRiskContract:           negRiskContract,
 		negRiskFeesContract:       negRiskFeesContract,
 		safeProxyFactoryContract:  safeProxyFactoryContract,
-	}, nil
+	}
+
+	ci.executor = &txExecutor{
+		client:      ci.client,
+		txSender:    ci.txSender,
+		getSafeAddr: ci.GetSafeAddress,
+		execSafeTx:  ci.ExecuteTransactionBySafeAndSingleSigner,
+	}
+
+	return ci, nil
 }
 
 // GetCollateral returns the Collateral (USDC) contract instance
@@ -1130,26 +1140,11 @@ func (b *ContractInterface) RedeemPositionsForEOA(
 	conditionId [32]byte,
 	indexSets []*big.Int,
 ) (common.Hash, error) {
-	txSender := b.getTxSender()
-
-	// Prepare calldata for redeemPositions
-	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	call, err := buildRedeemPositionsCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, indexSets)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+		return common.Hash{}, err
 	}
-	parentCollectionId := [32]byte{} // empty for root collection
-	calldata, err := parsedABI.Pack("redeemPositions", b.contractConfig.Collateral, parentCollectionId, conditionId, indexSets)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
-	}
-
-	// Send transaction
-	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, calldata, big.NewInt(0))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send redeem transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeEOA(call)
 }
 
 // RedeemPositionsNegRiskForEOA redeems NegRisk market positions using EOA
@@ -1159,25 +1154,11 @@ func (b *ContractInterface) RedeemPositionsNegRiskForEOA(
 	conditionId [32]byte,
 	amounts []*big.Int,
 ) (common.Hash, error) {
-	txSender := b.getTxSender()
-
-	// Prepare calldata for redeemPositions (NegRisk)
-	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	call, err := buildRedeemNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amounts)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+		return common.Hash{}, err
 	}
-	calldata, err := parsedABI.Pack("redeemPositions", conditionId, amounts)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
-	}
-
-	// Send transaction
-	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.NegRiskAdapter, calldata, big.NewInt(0))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send NegRisk redeem transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeEOA(call)
 }
 
 // SplitPositionForEOA splits collateral into conditional tokens for an EOA wallet
@@ -1188,26 +1169,11 @@ func (b *ContractInterface) SplitPositionForEOA(
 	partition []*big.Int,
 	amount *big.Int,
 ) (common.Hash, error) {
-	txSender := b.getTxSender()
-
-	// Prepare calldata for splitPosition
-	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	call, err := buildSplitPositionCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, partition, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+		return common.Hash{}, err
 	}
-	parentCollectionId := [32]byte{} // empty for root collection
-	calldata, err := parsedABI.Pack("splitPosition", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack splitPosition calldata: %w", err)
-	}
-
-	// Send transaction
-	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, calldata, big.NewInt(0))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send split transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeEOA(call)
 }
 
 // MergePositionsForEOA merges conditional tokens back into collateral for an EOA wallet
@@ -1218,29 +1184,14 @@ func (b *ContractInterface) MergePositionsForEOA(
 	partition []*big.Int,
 	amount *big.Int,
 ) (common.Hash, error) {
-	txSender := b.getTxSender()
-
-	// Prepare calldata for mergePositions
-	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
+	call, err := buildMergePositionsCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, partition, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
+		return common.Hash{}, err
 	}
-	parentCollectionId := [32]byte{} // empty for root collection
-	calldata, err := parsedABI.Pack("mergePositions", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack mergePositions calldata: %w", err)
-	}
-
-	// Send transaction
-	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.ConditionalTokens, calldata, big.NewInt(0))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send merge transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeEOA(call)
 }
 
-// RedeemPositionsForSafe redeems conditional tokens for a resolved market using TransactionSender
+// RedeemPositionsForSafe redeems conditional tokens for a resolved market using Safe
 func (b *ContractInterface) RedeemPositionsForSafe(
 	ctx context.Context,
 	safeSigner signer.SafeTradingSigner,
@@ -1248,39 +1199,14 @@ func (b *ContractInterface) RedeemPositionsForSafe(
 	conditionId [32]byte,
 	indexSets []*big.Int,
 ) (common.Hash, error) {
-	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	call, err := buildRedeemPositionsCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, indexSets)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+		return common.Hash{}, err
 	}
-
-	// Prepare calldata for redeemPositions
-	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
-	}
-	parentCollectionId := [32]byte{} // empty for root collection
-	calldata, err := parsedABI.Pack("redeemPositions", b.contractConfig.Collateral, parentCollectionId, conditionId, indexSets)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
-	}
-
-	// Execute Safe transaction
-	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
-		safeSigner, chainID, safeAddr,
-		b.contractConfig.ConditionalTokens,
-		big.NewInt(0), // value
-		calldata,
-		SafeOperationCall,
-		big.NewInt(0), // safeTxGas will be auto-estimated
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeSafe(safeSigner, chainID, call)
 }
 
-// RedeemPositionsNegRiskForSafe redeems NegRisk market positions using TransactionSender
+// RedeemPositionsNegRiskForSafe redeems NegRisk market positions using Safe
 func (b *ContractInterface) RedeemPositionsNegRiskForSafe(
 	ctx context.Context,
 	safeSigner signer.SafeTradingSigner,
@@ -1288,35 +1214,11 @@ func (b *ContractInterface) RedeemPositionsNegRiskForSafe(
 	conditionId [32]byte,
 	amounts []*big.Int,
 ) (common.Hash, error) {
-	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	call, err := buildRedeemNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amounts)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+		return common.Hash{}, err
 	}
-
-	// Prepare calldata for redeemPositions (NegRisk)
-	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
-	}
-	calldata, err := parsedABI.Pack("redeemPositions", conditionId, amounts)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack redeemPositions calldata: %w", err)
-	}
-
-	// Execute Safe transaction
-	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
-		safeSigner, chainID, safeAddr,
-		b.contractConfig.NegRiskAdapter,
-		big.NewInt(0), // value
-		calldata,
-		SafeOperationCall,
-		big.NewInt(0), // safeTxGas will be auto-estimated
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeSafe(safeSigner, chainID, call)
 }
 
 // SplitPositionForSafe splits collateral into conditional tokens for a Safe wallet
@@ -1328,36 +1230,11 @@ func (b *ContractInterface) SplitPositionForSafe(
 	partition []*big.Int,
 	amount *big.Int,
 ) (common.Hash, error) {
-	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	call, err := buildSplitPositionCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, partition, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+		return common.Hash{}, err
 	}
-
-	// Prepare calldata for splitPosition
-	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
-	}
-	parentCollectionId := [32]byte{} // empty for root collection
-	calldata, err := parsedABI.Pack("splitPosition", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack splitPosition calldata: %w", err)
-	}
-
-	// Execute Safe transaction
-	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
-		safeSigner, chainID, safeAddr,
-		b.contractConfig.ConditionalTokens,
-		big.NewInt(0), // value
-		calldata,
-		SafeOperationCall,
-		big.NewInt(0), // safeTxGas will be auto-estimated
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeSafe(safeSigner, chainID, call)
 }
 
 // MergePositionsForSafe merges conditional tokens back into collateral for a Safe wallet
@@ -1369,36 +1246,11 @@ func (b *ContractInterface) MergePositionsForSafe(
 	partition []*big.Int,
 	amount *big.Int,
 ) (common.Hash, error) {
-	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	call, err := buildMergePositionsCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, partition, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+		return common.Hash{}, err
 	}
-
-	// Prepare calldata for mergePositions
-	parsedABI, err := conditional_tokens.ConditionalTokensMetaData.GetAbi()
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse ConditionalTokens ABI: %w", err)
-	}
-	parentCollectionId := [32]byte{} // empty for root collection
-	calldata, err := parsedABI.Pack("mergePositions", b.contractConfig.Collateral, parentCollectionId, conditionId, partition, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack mergePositions calldata: %w", err)
-	}
-
-	// Execute Safe transaction
-	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
-		safeSigner, chainID, safeAddr,
-		b.contractConfig.ConditionalTokens,
-		big.NewInt(0), // value
-		calldata,
-		SafeOperationCall,
-		big.NewInt(0), // safeTxGas will be auto-estimated
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeSafe(safeSigner, chainID, call)
 }
 
 // SplitPositionNegRiskForEOA splits NegRisk market positions using EOA
@@ -1408,25 +1260,11 @@ func (b *ContractInterface) SplitPositionNegRiskForEOA(
 	conditionId [32]byte,
 	amount *big.Int,
 ) (common.Hash, error) {
-	txSender := b.getTxSender()
-
-	// Prepare calldata for splitPosition0 (NegRisk)
-	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	call, err := buildSplitNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+		return common.Hash{}, err
 	}
-	calldata, err := parsedABI.Pack("splitPosition0", conditionId, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack splitPosition0 calldata: %w", err)
-	}
-
-	// Send transaction
-	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.NegRiskAdapter, calldata, big.NewInt(0))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send NegRisk split transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeEOA(call)
 }
 
 // MergePositionsNegRiskForEOA merges NegRisk market positions using EOA
@@ -1436,25 +1274,11 @@ func (b *ContractInterface) MergePositionsNegRiskForEOA(
 	conditionId [32]byte,
 	amount *big.Int,
 ) (common.Hash, error) {
-	txSender := b.getTxSender()
-
-	// Prepare calldata for mergePositions0 (NegRisk)
-	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	call, err := buildMergeNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+		return common.Hash{}, err
 	}
-	calldata, err := parsedABI.Pack("mergePositions0", conditionId, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack mergePositions0 calldata: %w", err)
-	}
-
-	// Send transaction
-	txHash, err := txSender.SendEthereumTransaction(b.contractConfig.NegRiskAdapter, calldata, big.NewInt(0))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to send NegRisk merge transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeEOA(call)
 }
 
 // SplitPositionNegRiskForSafe splits NegRisk market positions using Safe
@@ -1465,35 +1289,11 @@ func (b *ContractInterface) SplitPositionNegRiskForSafe(
 	conditionId [32]byte,
 	amount *big.Int,
 ) (common.Hash, error) {
-	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
+	call, err := buildSplitNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+		return common.Hash{}, err
 	}
-
-	// Prepare calldata for splitPosition0 (NegRisk)
-	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
-	}
-	calldata, err := parsedABI.Pack("splitPosition0", conditionId, amount)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack splitPosition0 calldata: %w", err)
-	}
-
-	// Execute Safe transaction
-	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
-		safeSigner, chainID, safeAddr,
-		b.contractConfig.NegRiskAdapter,
-		big.NewInt(0), // value
-		calldata,
-		SafeOperationCall,
-		big.NewInt(0), // safeTxGas will be auto-estimated
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
-	}
-
-	return txHash, nil
+	return b.executor.executeSafe(safeSigner, chainID, call)
 }
 
 // MergePositionsNegRiskForSafe merges NegRisk market positions using Safe
@@ -1504,35 +1304,472 @@ func (b *ContractInterface) MergePositionsNegRiskForSafe(
 	conditionId [32]byte,
 	amount *big.Int,
 ) (common.Hash, error) {
+	call, err := buildMergeNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// --- V2 Extension Methods (backward-compatible) ---
+
+func (b *ContractInterface) splitCallForCollateral(collateralType CollateralType, conditionId [32]byte, partition []*big.Int, amount *big.Int) (contractCall, error) {
+	switch collateralType {
+	case CollateralUSDCE:
+		return buildSplitPositionCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, partition, amount)
+	case CollateralPUSD:
+		return buildAdapterSplitCall(b.contractConfig.CtfCollateralAdapter, conditionId, partition, amount)
+	default:
+		return contractCall{}, fmt.Errorf("unsupported collateral type: %d", collateralType)
+	}
+}
+
+func (b *ContractInterface) mergeCallForCollateral(collateralType CollateralType, conditionId [32]byte, partition []*big.Int, amount *big.Int) (contractCall, error) {
+	switch collateralType {
+	case CollateralUSDCE:
+		return buildMergePositionsCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, partition, amount)
+	case CollateralPUSD:
+		return buildAdapterMergeCall(b.contractConfig.CtfCollateralAdapter, conditionId, partition, amount)
+	default:
+		return contractCall{}, fmt.Errorf("unsupported collateral type: %d", collateralType)
+	}
+}
+
+func (b *ContractInterface) redeemCallForCollateral(collateralType CollateralType, conditionId [32]byte, indexSets []*big.Int) (contractCall, error) {
+	switch collateralType {
+	case CollateralUSDCE:
+		return buildRedeemPositionsCall(b.contractConfig.ConditionalTokens, b.contractConfig.Collateral, conditionId, indexSets)
+	case CollateralPUSD:
+		return buildAdapterRedeemCall(b.contractConfig.CtfCollateralAdapter, conditionId, indexSets)
+	default:
+		return contractCall{}, fmt.Errorf("unsupported collateral type: %d", collateralType)
+	}
+}
+
+func (b *ContractInterface) splitNegRiskCallForCollateral(collateralType CollateralType, conditionId [32]byte, partition []*big.Int, amount *big.Int) (contractCall, error) {
+	switch collateralType {
+	case CollateralUSDCE:
+		return buildSplitNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amount)
+	case CollateralPUSD:
+		return buildNegRiskAdapterSplitCall(b.contractConfig.NegRiskCtfCollateralAdapter, conditionId, partition, amount)
+	default:
+		return contractCall{}, fmt.Errorf("unsupported collateral type: %d", collateralType)
+	}
+}
+
+func (b *ContractInterface) mergeNegRiskCallForCollateral(collateralType CollateralType, conditionId [32]byte, partition []*big.Int, amount *big.Int) (contractCall, error) {
+	switch collateralType {
+	case CollateralUSDCE:
+		return buildMergeNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amount)
+	case CollateralPUSD:
+		return buildNegRiskAdapterMergeCall(b.contractConfig.NegRiskCtfCollateralAdapter, conditionId, partition, amount)
+	default:
+		return contractCall{}, fmt.Errorf("unsupported collateral type: %d", collateralType)
+	}
+}
+
+func (b *ContractInterface) redeemNegRiskCallForCollateral(collateralType CollateralType, conditionId [32]byte, amounts []*big.Int) (contractCall, error) {
+	switch collateralType {
+	case CollateralUSDCE:
+		return buildRedeemNegRiskCall(b.contractConfig.NegRiskAdapter, conditionId, amounts)
+	case CollateralPUSD:
+		return buildNegRiskAdapterRedeemCall(b.contractConfig.NegRiskCtfCollateralAdapter, conditionId, amounts)
+	default:
+		return contractCall{}, fmt.Errorf("unsupported collateral type: %d", collateralType)
+	}
+}
+
+// SplitPositionWithCollateralForEOA splits using the specified collateral type
+func (b *ContractInterface) SplitPositionWithCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.splitCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// MergePositionsWithCollateralForEOA merges using the specified collateral type
+func (b *ContractInterface) MergePositionsWithCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.mergeCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// RedeemPositionsWithCollateralForEOA redeems using the specified collateral type
+func (b *ContractInterface) RedeemPositionsWithCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	indexSets []*big.Int,
+) (common.Hash, error) {
+	call, err := b.redeemCallForCollateral(collateralType, conditionId, indexSets)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// SplitPositionNegRiskWithCollateralForEOA splits NegRisk using the specified collateral type
+func (b *ContractInterface) SplitPositionNegRiskWithCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.splitNegRiskCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// MergePositionsNegRiskWithCollateralForEOA merges NegRisk using the specified collateral type
+func (b *ContractInterface) MergePositionsNegRiskWithCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.mergeNegRiskCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// RedeemPositionsNegRiskWithCollateralForEOA redeems NegRisk using the specified collateral type
+func (b *ContractInterface) RedeemPositionsNegRiskWithCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	amounts []*big.Int,
+) (common.Hash, error) {
+	call, err := b.redeemNegRiskCallForCollateral(collateralType, conditionId, amounts)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// SplitPositionWithCollateralForSafe splits using the specified collateral type via Safe
+func (b *ContractInterface) SplitPositionWithCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.splitCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// MergePositionsWithCollateralForSafe merges using the specified collateral type via Safe
+func (b *ContractInterface) MergePositionsWithCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.mergeCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// RedeemPositionsWithCollateralForSafe redeems using the specified collateral type via Safe
+func (b *ContractInterface) RedeemPositionsWithCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	indexSets []*big.Int,
+) (common.Hash, error) {
+	call, err := b.redeemCallForCollateral(collateralType, conditionId, indexSets)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// SplitPositionNegRiskWithCollateralForSafe splits NegRisk using the specified collateral type via Safe
+func (b *ContractInterface) SplitPositionNegRiskWithCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.splitNegRiskCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// MergePositionsNegRiskWithCollateralForSafe merges NegRisk using the specified collateral type via Safe
+func (b *ContractInterface) MergePositionsNegRiskWithCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	partition []*big.Int,
+	amount *big.Int,
+) (common.Hash, error) {
+	call, err := b.mergeNegRiskCallForCollateral(collateralType, conditionId, partition, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// RedeemPositionsNegRiskWithCollateralForSafe redeems NegRisk using the specified collateral type via Safe
+func (b *ContractInterface) RedeemPositionsNegRiskWithCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	collateralType CollateralType,
+	conditionId [32]byte,
+	amounts []*big.Int,
+) (common.Hash, error) {
+	call, err := b.redeemNegRiskCallForCollateral(collateralType, conditionId, amounts)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// --- pUSD Convenience Methods ---
+
+func (b *ContractInterface) SplitPositionPUSDForEOA(ctx context.Context, eoaSigner signer.EOATradingSigner, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.SplitPositionWithCollateralForEOA(ctx, eoaSigner, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) MergePositionsPUSDForEOA(ctx context.Context, eoaSigner signer.EOATradingSigner, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.MergePositionsWithCollateralForEOA(ctx, eoaSigner, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) RedeemPositionsPUSDForEOA(ctx context.Context, eoaSigner signer.EOATradingSigner, conditionId [32]byte, indexSets []*big.Int) (common.Hash, error) {
+	return b.RedeemPositionsWithCollateralForEOA(ctx, eoaSigner, CollateralPUSD, conditionId, indexSets)
+}
+
+func (b *ContractInterface) SplitPositionNegRiskPUSDForEOA(ctx context.Context, eoaSigner signer.EOATradingSigner, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.SplitPositionNegRiskWithCollateralForEOA(ctx, eoaSigner, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) MergePositionsNegRiskPUSDForEOA(ctx context.Context, eoaSigner signer.EOATradingSigner, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.MergePositionsNegRiskWithCollateralForEOA(ctx, eoaSigner, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) RedeemPositionsNegRiskPUSDForEOA(ctx context.Context, eoaSigner signer.EOATradingSigner, conditionId [32]byte, amounts []*big.Int) (common.Hash, error) {
+	return b.RedeemPositionsNegRiskWithCollateralForEOA(ctx, eoaSigner, CollateralPUSD, conditionId, amounts)
+}
+
+func (b *ContractInterface) SplitPositionPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.SplitPositionWithCollateralForSafe(ctx, safeSigner, chainID, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) MergePositionsPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.MergePositionsWithCollateralForSafe(ctx, safeSigner, chainID, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) RedeemPositionsPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, conditionId [32]byte, indexSets []*big.Int) (common.Hash, error) {
+	return b.RedeemPositionsWithCollateralForSafe(ctx, safeSigner, chainID, CollateralPUSD, conditionId, indexSets)
+}
+
+func (b *ContractInterface) SplitPositionNegRiskPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.SplitPositionNegRiskWithCollateralForSafe(ctx, safeSigner, chainID, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) MergePositionsNegRiskPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, conditionId [32]byte, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	return b.MergePositionsNegRiskWithCollateralForSafe(ctx, safeSigner, chainID, CollateralPUSD, conditionId, partition, amount)
+}
+
+func (b *ContractInterface) RedeemPositionsNegRiskPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, conditionId [32]byte, amounts []*big.Int) (common.Hash, error) {
+	return b.RedeemPositionsNegRiskWithCollateralForSafe(ctx, safeSigner, chainID, CollateralPUSD, conditionId, amounts)
+}
+
+// --- Wrap/Unwrap Methods ---
+
+// WrapCollateralForEOA wraps an asset (USDC/USDC.e) into pUSD via CollateralOnramp
+func (b *ContractInterface) WrapCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	asset common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
+	to := eoaSigner.GetAddress()
+	call, err := buildWrapCall(b.contractConfig.CollateralOnramp, asset, to, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// UnwrapCollateralForEOA unwraps pUSD back to an asset (USDC/USDC.e) via CollateralOfframp
+func (b *ContractInterface) UnwrapCollateralForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+	asset common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
+	to := eoaSigner.GetAddress()
+	call, err := buildUnwrapCall(b.contractConfig.CollateralOfframp, asset, to, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeEOA(call)
+}
+
+// WrapCollateralForSafe wraps an asset into pUSD via Safe
+func (b *ContractInterface) WrapCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	asset common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
 	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
 	}
-
-	// Prepare calldata for mergePositions0 (NegRisk)
-	parsedABI, err := negriskadapter.NegRiskAdapterMetaData.GetAbi()
+	call, err := buildWrapCall(b.contractConfig.CollateralOnramp, asset, safeAddr, amount)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to parse NegRiskAdapter ABI: %w", err)
+		return common.Hash{}, err
 	}
-	calldata, err := parsedABI.Pack("mergePositions0", conditionId, amount)
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// UnwrapCollateralForSafe unwraps pUSD back to an asset via Safe
+func (b *ContractInterface) UnwrapCollateralForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	asset common.Address,
+	amount *big.Int,
+) (common.Hash, error) {
+	safeAddr, err := b.GetSafeAddress(safeSigner.GetAddress())
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to pack mergePositions0 calldata: %w", err)
+		return common.Hash{}, fmt.Errorf("failed to get Safe address: %w", err)
+	}
+	call, err := buildUnwrapCall(b.contractConfig.CollateralOfframp, asset, safeAddr, amount)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return b.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// --- EnableTradingV2 ---
+
+// EnableTradingV2ForEOA approves all V2 contracts for trading
+func (b *ContractInterface) EnableTradingV2ForEOA(
+	ctx context.Context,
+	eoaSigner signer.EOATradingSigner,
+) ([]common.Hash, error) {
+	maxApproval := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+	var calls []contractCall
+
+	// pUSD approvals
+	for _, spender := range []common.Address{
+		b.contractConfig.CtfCollateralAdapter,
+		b.contractConfig.NegRiskCtfCollateralAdapter,
+		b.contractConfig.CollateralOfframp,
+	} {
+		call, err := buildERC20ApproveCall(b.contractConfig.CollateralToken, spender, maxApproval)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build pUSD approve call: %w", err)
+		}
+		calls = append(calls, call)
 	}
 
-	// Execute Safe transaction
-	txHash, err := b.ExecuteTransactionBySafeAndSingleSigner(
-		safeSigner, chainID, safeAddr,
-		b.contractConfig.NegRiskAdapter,
-		big.NewInt(0), // value
-		calldata,
-		SafeOperationCall,
-		big.NewInt(0), // safeTxGas will be auto-estimated
-	)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("failed to execute Safe transaction: %w", err)
+	// CTF setApprovalForAll
+	for _, operator := range []common.Address{
+		b.contractConfig.ExchangeV2,
+		b.contractConfig.NegRiskExchangeV2,
+		b.contractConfig.NegRiskCtfCollateralAdapter,
+		b.contractConfig.CtfCollateralAdapter,
+	} {
+		call, err := buildSetApprovalForAllCall(b.contractConfig.ConditionalTokens, operator, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build setApprovalForAll call: %w", err)
+		}
+		calls = append(calls, call)
 	}
 
-	return txHash, nil
+	return b.executor.executeBatchEOA(calls)
+}
+
+// EnableTradingV2ForSafe approves all V2 contracts for trading via Safe
+func (b *ContractInterface) EnableTradingV2ForSafe(
+	ctx context.Context,
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+) ([]common.Hash, error) {
+	maxApproval := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+	var calls []contractCall
+
+	for _, spender := range []common.Address{
+		b.contractConfig.CtfCollateralAdapter,
+		b.contractConfig.NegRiskCtfCollateralAdapter,
+		b.contractConfig.CollateralOfframp,
+	} {
+		call, err := buildERC20ApproveCall(b.contractConfig.CollateralToken, spender, maxApproval)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build pUSD approve call: %w", err)
+		}
+		calls = append(calls, call)
+	}
+
+	for _, operator := range []common.Address{
+		b.contractConfig.ExchangeV2,
+		b.contractConfig.NegRiskExchangeV2,
+		b.contractConfig.NegRiskCtfCollateralAdapter,
+		b.contractConfig.CtfCollateralAdapter,
+	} {
+		call, err := buildSetApprovalForAllCall(b.contractConfig.ConditionalTokens, operator, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build setApprovalForAll call: %w", err)
+		}
+		calls = append(calls, call)
+	}
+
+	return b.executor.executeBatchSafe(safeSigner, chainID, calls)
 }
 
 // BuildSafeTransactionTypedData builds the typed data for Gnosis Safe transaction
