@@ -307,8 +307,20 @@ func (v *ContractInterfaceV2) enableTradingCalls() ([]contractCall, error) {
 
 // --- Wrap / Unwrap ---
 
+// validateWrapAsset checks if the asset is a supported collateral token (USDC or USDC.e).
+func (v *ContractInterfaceV2) validateWrapAsset(asset common.Address) error {
+	if asset != v.config.Collateral && asset != v.config.USDC {
+		return fmt.Errorf("unsupported wrap asset %s: only USDC (%s) and USDC.e (%s) are supported",
+			asset.Hex(), v.config.USDC.Hex(), v.config.Collateral.Hex())
+	}
+	return nil
+}
+
 // WrapToPUSDForEOA wraps an asset (USDC or USDC.e) to pUSD via the CollateralOnramp.
 func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
+	if err := v.validateWrapAsset(asset); err != nil {
+		return common.Hash{}, err
+	}
 	call, err := buildWrapCall(v.config.CollateralOnramp, asset, to, amount)
 	if err != nil {
 		return common.Hash{}, err
@@ -318,6 +330,9 @@ func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common
 
 // WrapToPUSDForSafe wraps an asset to pUSD via Safe.
 func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
+	if err := v.validateWrapAsset(asset); err != nil {
+		return common.Hash{}, err
+	}
 	call, err := buildWrapCall(v.config.CollateralOnramp, asset, to, amount)
 	if err != nil {
 		return common.Hash{}, err
@@ -327,6 +342,9 @@ func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner 
 
 // UnwrapFromPUSDForEOA unwraps pUSD to an asset (USDC or USDC.e) via the CollateralOfframp.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
+	if err := v.validateWrapAsset(asset); err != nil {
+		return common.Hash{}, err
+	}
 	call, err := buildUnwrapCall(v.config.CollateralOfframp, asset, to, amount)
 	if err != nil {
 		return common.Hash{}, err
@@ -336,6 +354,9 @@ func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset co
 
 // UnwrapFromPUSDForSafe unwraps pUSD to an asset via Safe.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
+	if err := v.validateWrapAsset(asset); err != nil {
+		return common.Hash{}, err
+	}
 	call, err := buildUnwrapCall(v.config.CollateralOfframp, asset, to, amount)
 	if err != nil {
 		return common.Hash{}, err
