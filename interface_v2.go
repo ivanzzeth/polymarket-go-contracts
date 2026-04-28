@@ -307,11 +307,13 @@ func (v *ContractInterfaceV2) enableTradingCalls() ([]contractCall, error) {
 
 // --- Wrap / Unwrap ---
 
-// validateWrapAsset checks if the asset is a supported collateral token (USDC or USDC.e).
+// validateWrapAsset checks if the asset is a supported collateral token for wrapping.
+// IMPORTANT: Currently only USDC.e (bridged) is supported by the CollateralOnramp contract.
+// Native USDC (0x3c499c...) will be rejected with AssetNotSupported (0x49b8b3ac).
 func (v *ContractInterfaceV2) validateWrapAsset(asset common.Address) error {
-	if asset != v.config.Collateral && asset != v.config.USDC {
-		return fmt.Errorf("unsupported wrap asset %s: only USDC (%s) and USDC.e (%s) are supported",
-			asset.Hex(), v.config.USDC.Hex(), v.config.Collateral.Hex())
+	if asset != v.config.Collateral {
+		return fmt.Errorf("unsupported wrap asset %s: only USDC.e (%s) is currently supported by CollateralOnramp (native USDC not supported)",
+			asset.Hex(), v.config.Collateral.Hex())
 	}
 	return nil
 }
