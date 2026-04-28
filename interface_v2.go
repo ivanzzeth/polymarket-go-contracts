@@ -274,8 +274,10 @@ func (v *ContractInterfaceV2) enableTradingCalls() ([]contractCall, error) {
 		calls = append(calls, usdcApproveCall)
 	}
 
-	// pUSD approve → adapters + offramp
+	// pUSD approve → exchanges + adapters + offramp
 	pUSDApproveTargets := []common.Address{
+		v.config.ExchangeV2,
+		v.config.NegRiskExchangeV2,
 		v.config.CtfCollateralAdapter,
 		v.config.NegRiskCtfCollateralAdapter,
 		v.config.CollateralOfframp,
