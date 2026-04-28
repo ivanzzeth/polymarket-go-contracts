@@ -318,7 +318,7 @@ func (v *ContractInterfaceV2) validateWrapAsset(asset common.Address) error {
 	return nil
 }
 
-// WrapToPUSDForEOA wraps an asset (USDC or USDC.e) to pUSD via the CollateralOnramp.
+// WrapToPUSDForEOA wraps USDC.e to pUSD via the CollateralOnramp.
 func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
@@ -330,7 +330,7 @@ func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common
 	return v.executor.executeEOA(call)
 }
 
-// WrapToPUSDForSafe wraps an asset to pUSD via Safe.
+// WrapToPUSDForSafe wraps USDC.e to pUSD via Safe.
 func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
@@ -342,7 +342,7 @@ func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner 
 	return v.executor.executeSafe(safeSigner, chainID, call)
 }
 
-// UnwrapFromPUSDForEOA unwraps pUSD to an asset (USDC or USDC.e) via the CollateralOfframp.
+// UnwrapFromPUSDForEOA unwraps pUSD to USDC.e via the CollateralOfframp.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
@@ -354,7 +354,7 @@ func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset co
 	return v.executor.executeEOA(call)
 }
 
-// UnwrapFromPUSDForSafe unwraps pUSD to an asset via Safe.
+// UnwrapFromPUSDForSafe unwraps pUSD to USDC.e via Safe.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
