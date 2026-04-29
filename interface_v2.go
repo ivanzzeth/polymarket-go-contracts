@@ -40,10 +40,12 @@ type TokenStatus struct {
 }
 
 // V2BalanceInfo holds pUSD and USDC.e balances plus V2-relevant allowances and approvals.
+// Total = PUSDBalance + USDCEBalance is the effective collateral available for trading.
 type V2BalanceInfo struct {
 	PUSDBalance  *big.Int
 	USDCBalance  *big.Int
 	USDCEBalance *big.Int
+	Total        *big.Int
 
 	USDCAllowanceOnramp  *big.Int
 	USDCEAllowanceOnramp *big.Int
@@ -273,6 +275,8 @@ func (v *ContractInterfaceV2) GetBalancesAtBlock(ctx context.Context, address co
 		return nil, fmt.Errorf("failed to check CTF approval for NegRiskCtfCollateralAdapter: %w", err)
 	}
 
+	info.Total = new(big.Int).Add(pusdBal, usdceBal)
+
 	return info, nil
 }
 
@@ -284,7 +288,11 @@ func (v *ContractInterfaceV2) CollateralToken() *collateral_token.CollateralToke
 func (v *ContractInterfaceV2) NativeUSDC() *erc20.Erc20                               { return v.usdc }
 func (v *ContractInterfaceV2) USDCE() *erc20.Erc20                                   { return v.usdce }
 func (v *ContractInterfaceV2) ConditionalTokens() *conditional_tokens.ConditionalTokens { return v.conditionalTokens }
-func (v *ContractInterfaceV2) CollateralOnramp() *collateral_onramp.CollateralOnramp  { return v.collateralOnramp }
+
+// GetConditionalTokens is a backward-compatible alias for ConditionalTokens.
+func (v *ContractInterfaceV2) GetConditionalTokens() *conditional_tokens.ConditionalTokens { return v.conditionalTokens }
+
+func (v *ContractInterfaceV2) CollateralOnramp() *collateral_onramp.CollateralOnramp { return v.collateralOnramp }
 func (v *ContractInterfaceV2) CollateralOfframp() *collateral_offramp.CollateralOfframp { return v.collateralOfframp }
 func (v *ContractInterfaceV2) CtfCollateralAdapter() *ctf_collateral_adapter.CtfCollateralAdapter { return v.ctfCollateralAdapter }
 func (v *ContractInterfaceV2) NegRiskCtfCollateralAdapter() *neg_risk_ctf_collateral_adapter.NegRiskCtfCollateralAdapter { return v.negRiskCtfCollateralAdapter }
