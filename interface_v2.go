@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
+	ethereum "github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ivanzzeth/ethclient"
+	"github.com/ivanzzeth/ethsig"
 	collateral_offramp "github.com/ivanzzeth/polymarket-go-contracts/contracts/collateral-offramp"
 	collateral_onramp "github.com/ivanzzeth/polymarket-go-contracts/contracts/collateral-onramp"
 	collateral_token "github.com/ivanzzeth/polymarket-go-contracts/contracts/collateral-token"
@@ -17,9 +22,12 @@ import (
 	ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/ctf-collateral-adapter"
 	"github.com/ivanzzeth/polymarket-go-contracts/contracts/erc20"
 	exchange_v2 "github.com/ivanzzeth/polymarket-go-contracts/contracts/exchange-v2"
+	gnosissafe "github.com/ivanzzeth/polymarket-go-contracts/contracts/gnosis-safe-l2"
 	neg_risk_ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-ctf-collateral-adapter"
 	neg_risk_v2 "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-v2"
 	permissioned_ramp "github.com/ivanzzeth/polymarket-go-contracts/contracts/permissioned-ramp"
+	safeproxyfactory "github.com/ivanzzeth/polymarket-go-contracts/contracts/safe-proxy-factory"
+	"github.com/ivanzzeth/ethsig/eip712"
 	"github.com/ivanzzeth/polymarket-go-contracts/sender"
 	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
@@ -53,10 +61,12 @@ type V2BalanceInfo struct {
 // ContractInterfaceV2 provides a clean V2 API where pUSD is the default collateral.
 // It delegates to the same shared txExecutor and calldata builders used by V1.
 type ContractInterfaceV2 struct {
-	config   *ContractConfig
-	client   ethclient.EthClientInterface
+	chainID *big.Int
+	config  *ContractConfig
+	client  ethclient.EthClientInterface
 	executor *txExecutor
 
+	// V2 contracts
 	exchangeV2                  *exchange_v2.ExchangeV2
 	negRiskExchangeV2           *neg_risk_v2.NegRiskV2
 	collateralToken             *collateral_token.CollateralToken
@@ -69,6 +79,10 @@ type ContractInterfaceV2 struct {
 	negRiskCtfCollateralAdapter *neg_risk_ctf_collateral_adapter.NegRiskCtfCollateralAdapter
 	permissionedRamp            *permissioned_ramp.PermissionedRamp
 
+	// Safe support (migrated from V1 for backward compatibility)
+	safeProxyFactory *safeproxyfactory.SafeProxyFactory // SafeProxyFactory contract
+	safeAddressCache sync.Map                           // Cache for Safe addresses (key: EOA hex string, value: Safe address)
+
 	// Token status tracking (lazy refresh)
 	tokenStatusMu sync.RWMutex
 	tokenStatus   map[common.Address]*TokenStatus
@@ -76,12 +90,12 @@ type ContractInterfaceV2 struct {
 }
 
 // NewContractInterfaceV2 creates a V2 interface. All V2 contract addresses in config must be non-zero.
+// V2 is fully self-contained and does not depend on V1 ContractInterface.
 func NewContractInterfaceV2(
 	client ethclient.EthClientInterface,
 	config *ContractConfig,
 	txSender sender.TransactionSender,
-	getSafeAddr func(eoa common.Address) (common.Address, error),
-	execSafeTx func(safeSigner signer.SafeTradingSigner, chainID *big.Int, safeAddr, to common.Address, value *big.Int, data []byte, operation SafeOperation, safeTxGas *big.Int) (common.Hash, error),
+	chainID *big.Int,
 ) (*ContractInterfaceV2, error) {
 	if config.ExchangeV2 == (common.Address{}) {
 		return nil, fmt.Errorf("V2 not configured: ExchangeV2 address is zero")
@@ -135,15 +149,21 @@ func NewContractInterfaceV2(
 		return nil, fmt.Errorf("failed to create PermissionedRamp binding: %w", err)
 	}
 
+	// Initialize SafeProxyFactory for Safe address computation (migrated from V1)
+	var safeFactory *safeproxyfactory.SafeProxyFactory
+	if config.SafeProxyFactory != (common.Address{}) {
+		safeFactory, err = safeproxyfactory.NewSafeProxyFactory(config.SafeProxyFactory, client)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SafeProxyFactory binding: %w", err)
+		}
+	}
+
+	// Create V2 instance first (without executor)
 	v2 := &ContractInterfaceV2{
-		config: config,
-		client: client,
-		executor: &txExecutor{
-			client:      client,
-			txSender:    txSender,
-			getSafeAddr: getSafeAddr,
-			execSafeTx:  execSafeTx,
-		},
+		chainID: chainID,
+		config:  config,
+		client:  client,
+
 		exchangeV2:                  exchV2,
 		negRiskExchangeV2:           nrV2,
 		collateralToken:             ct,
@@ -155,8 +175,19 @@ func NewContractInterfaceV2(
 		ctfCollateralAdapter:        ctfAdapter,
 		negRiskCtfCollateralAdapter: nrCtfAdapter,
 		permissionedRamp:            pr,
-		tokenStatus:                 make(map[common.Address]*TokenStatus),
-		statusTTL:                   5 * time.Minute,
+
+		safeProxyFactory: safeFactory,
+
+		tokenStatus: make(map[common.Address]*TokenStatus),
+		statusTTL:   5 * time.Minute,
+	}
+
+	// Create executor using v2's own methods (no dependency on V1)
+	v2.executor = &txExecutor{
+		client:      client,
+		txSender:    txSender,
+		getSafeAddr: v2.GetSafeAddress,
+		execSafeTx:  v2.ExecuteTransactionBySafeAndSingleSigner,
 	}
 
 	// Initial token status check (non-blocking, just log warnings)
@@ -655,3 +686,320 @@ func (v *ContractInterfaceV2) GetTokenStatus(asset common.Address) (*TokenStatus
 	return v.getTokenStatus(asset)
 }
 
+// ============================================================================
+// Safe Support (Migrated from V1 for Backward Compatibility)
+// ============================================================================
+
+// GetSafeAddress computes the Safe address for a given EOA address.
+// Migrated from V1 ContractInterface to make V2 fully self-contained.
+func (v *ContractInterfaceV2) GetSafeAddress(eoa common.Address) (common.Address, error) {
+	if v.safeProxyFactory == nil {
+		return common.Address{}, fmt.Errorf("SafeProxyFactory not configured")
+	}
+
+	// Check cache first
+	if cached, ok := v.safeAddressCache.Load(eoa.Hex()); ok {
+		return cached.(common.Address), nil
+	}
+
+	// Compute safe address
+	safeAddr, err := v.safeProxyFactory.ComputeProxyAddress(nil, eoa)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("failed to compute Safe address: %w", err)
+	}
+
+	// Store in cache
+	v.safeAddressCache.Store(eoa.Hex(), safeAddr)
+
+	return safeAddr, nil
+}
+
+// GetGnosisSafeL2 returns a GnosisSafeL2 contract instance at the given address.
+// Migrated from V1 for Safe transaction support.
+func (v *ContractInterfaceV2) GetGnosisSafeL2(addr common.Address) (*gnosissafe.GnosisSafeL2, error) {
+	return gnosissafe.NewGnosisSafeL2(addr, v.client)
+}
+
+// EstimateSafeTxGas estimates the gas required for a Safe transaction execution.
+// This uses simulateAndRevert to accurately estimate gas without requiring valid signatures.
+// Migrated from V1 for Safe transaction support.
+func (v *ContractInterfaceV2) EstimateSafeTxGas(safeAddr, to common.Address, value *big.Int, data []byte, operation SafeOperation) (*big.Int, error) {
+	// Parse Safe ABI to encode the simulateAndRevert call
+	parsedABI, err := abi.JSON(strings.NewReader(gnosissafe.GnosisSafeL2MetaData.ABI))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse GnosisSafeL2 ABI: %w", err)
+	}
+
+	// Encode the target transaction call data (the transaction we want to simulate)
+	// We create the call data for the internal transaction
+	var targetCallData []byte
+	if len(data) > 0 {
+		targetCallData = data
+	} else {
+		targetCallData = []byte{}
+	}
+
+	// Use simulateAndRevert to estimate gas
+	// simulateAndRevert(address targetContract, bytes calldataPayload)
+	simulateCallData, err := parsedABI.Pack("simulateAndRevert", to, targetCallData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack simulateAndRevert call data: %w", err)
+	}
+
+	// Call simulateAndRevert - it will always revert with the execution result
+	msg := ethereum.CallMsg{
+		To:   &safeAddr,
+		Data: simulateCallData,
+	}
+
+	// EstimateGas will fail because simulateAndRevert always reverts,
+	// but we can extract the gas estimation from the error
+	gasLimit, err := v.client.EstimateGas(context.Background(), msg)
+	if err != nil {
+		// simulateAndRevert always reverts, so we expect an error
+		// However, EstimateGas still provides a gas estimate
+		// If it's a revert with execution result, that's expected
+		// For now, we'll use a fallback approach if estimation fails
+
+		// Try a direct estimation on the target call
+		directMsg := ethereum.CallMsg{
+			From:  safeAddr, // Simulate call from Safe
+			To:    &to,
+			Value: value,
+			Data:  targetCallData,
+		}
+
+		directGas, directErr := v.client.EstimateGas(context.Background(), directMsg)
+		if directErr != nil {
+			return nil, fmt.Errorf("failed to estimate gas: %w", directErr)
+		}
+
+		// Add Safe overhead: approximately 15000 gas for Safe execution logic
+		// This includes signature verification, storage operations, and event emissions
+		safeTxGas := big.NewInt(int64(directGas + 15000))
+		// Add 50% buffer for safety to account for GS010 check requirements
+		// GS010 requires: gasleft() >= ((safeTxGas * 64) / 63).max(safeTxGas + 2500) + 500
+		safeTxGas = new(big.Int).Mul(safeTxGas, big.NewInt(150))
+		safeTxGas = new(big.Int).Div(safeTxGas, big.NewInt(100))
+		return safeTxGas, nil
+	}
+
+	// If EstimateGas succeeded (shouldn't happen with simulateAndRevert, but handle it)
+	safeTxGas := big.NewInt(int64(gasLimit))
+	// Add 50% buffer for safety to account for GS010 check requirements
+	safeTxGas = new(big.Int).Mul(safeTxGas, big.NewInt(150))
+	safeTxGas = new(big.Int).Div(safeTxGas, big.NewInt(100))
+	return safeTxGas, nil
+}
+
+// ExecuteTransactionBySafeAndSingleSigner executes a Safe transaction with a single EOA signer.
+// Migrated from V1 to make V2 fully self-contained.
+func (v *ContractInterfaceV2) ExecuteTransactionBySafeAndSingleSigner(
+	safeSigner signer.SafeTradingSigner,
+	chainID *big.Int,
+	safeAddr, to common.Address,
+	value *big.Int,
+	data []byte,
+	operation SafeOperation,
+	safeTxGas *big.Int,
+) (common.Hash, error) {
+	baseGas := big.NewInt(0)
+	gasPrice := big.NewInt(0)
+	gasToken := common.Address{}
+	refundReceiver := common.Address{}
+
+	safeContract, err := v.GetGnosisSafeL2(safeAddr)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	nonce, err := safeContract.Nonce(nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	// Estimate safeTxGas if not set
+	if safeTxGas == nil || safeTxGas.Cmp(big.NewInt(0)) == 0 {
+		estimatedGas, err := v.EstimateSafeTxGas(safeAddr, to, value, data, operation)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to estimate safeTxGas: %w", err)
+		}
+		safeTxGas = estimatedGas
+	}
+
+	// Build typed data for signing
+	typedData := BuildSafeTransactionTypedData(chainID, safeAddr, to, value, data, operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, nonce)
+
+	// Sign
+	signature, err := safeSigner.SignTypedData(typedData)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to sign Safe transaction: %w", err)
+	}
+
+	// Verify signature
+	safeTxHash, _, err := eip712.TypedDataAndHash(typedData)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to compute typed data hash: %w", err)
+	}
+
+	safeL2, err := v.GetGnosisSafeL2(safeAddr)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get GnosisSafeL2 contract: %w", err)
+	}
+
+	encodedTxData, err := safeL2.EncodeTransactionData(nil, to, value, data, uint8(operation), safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, nonce)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to encode transaction data: %w", err)
+	}
+
+	err = safeL2.CheckSignatures(nil, common.BytesToHash(safeTxHash), encodedTxData, signature)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	// Execute via txSender
+	if v.executor.txSender == nil {
+		return common.Hash{}, fmt.Errorf("txSender not configured")
+	}
+
+	safeAbi, err := gnosissafe.GnosisSafeL2MetaData.GetAbi()
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to get Safe ABI: %w", err)
+	}
+
+	execTxData, err := safeAbi.Pack(
+		"execTransaction",
+		to, value, data, uint8(operation),
+		safeTxGas, baseGas, gasPrice,
+		gasToken, refundReceiver, signature,
+	)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to pack execTransaction: %w", err)
+	}
+
+	txHash, err := v.executor.txSender.SendEthereumTransaction(safeAddr, execTxData, big.NewInt(0))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("failed to send Safe transaction: %w", err)
+	}
+
+	return txHash, nil
+}
+
+// ====================================================================================
+// Backward Compatibility Methods (migrated from V1 ContractInterface)
+// ====================================================================================
+
+// PrintBalanceAndAllowance prints V2 balance and allowance information in a user-friendly format
+func (v *ContractInterfaceV2) PrintBalanceAndAllowance(ctx context.Context, address common.Address) error {
+	info, err := v.GetBalances(ctx, address)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("=== V2 Balance and Allowance Status ===")
+
+	// Print pUSD Balance (assuming 6 decimals like USDC)
+	fmt.Printf("pUSD Balance: %s pUSD\n", formatUSDC(info.PUSDBalance))
+	fmt.Printf("USDC Balance: %s USDC\n", formatUSDC(info.USDCBalance))
+	fmt.Printf("USDC.e Balance: %s USDC.e\n\n", formatUSDC(info.USDCEBalance))
+
+	// Print Allowances
+	fmt.Println("Allowances:")
+	fmt.Printf("  USDC → CollateralOnramp: %s\n", checkmark(info.USDCAllowanceOnramp.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  USDC.e → CollateralOnramp: %s\n", checkmark(info.USDCEAllowanceOnramp.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  pUSD → CtfCollateralAdapter: %s\n", checkmark(info.PUSDAllowanceCtfAdapter.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  pUSD → NegRiskCtfCollateralAdapter: %s\n", checkmark(info.PUSDAllowanceNegRiskCtfAdapter.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  pUSD → CollateralOfframp: %s\n", checkmark(info.PUSDAllowanceOfframp.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  CTF → ExchangeV2: %s\n", checkmark(info.CTFApprovedExchangeV2))
+	fmt.Printf("  CTF → NegRiskExchangeV2: %s\n", checkmark(info.CTFApprovedNegRiskExchangeV2))
+	fmt.Printf("  CTF → CtfCollateralAdapter: %s\n", checkmark(info.CTFApprovedCtfCollateralAdapter))
+	fmt.Printf("  CTF → NegRiskCtfCollateralAdapter: %s\n\n", checkmark(info.CTFApprovedNegRiskCtfCollateralAdapter))
+
+	return nil
+}
+
+// DeploySafe deploys a Safe proxy for the given Safe signer
+// Note: Safe deployment is the same in V1 and V2 (uses SafeProxyFactory)
+func (v *ContractInterfaceV2) DeploySafe(safeSigner signer.SafeTradingSigner) (safeProxy common.Address, txHash common.Hash, err error) {
+	zeroAddr := common.Address{}
+	paymentToken := zeroAddr
+	payment := big.NewInt(0)
+	paymentReceiver := zeroAddr
+
+	typedData := BuildCreateProxyTypedData(v.chainID, v.config.SafeProxyFactory, paymentToken, payment, paymentReceiver)
+	signatureBytes, err := safeSigner.SignTypedData(typedData)
+	if err != nil {
+		return common.Address{}, common.Hash{}, err
+	}
+
+	r, s, v2, err := ethsig.ConvertSigBytes2RSV(signatureBytes)
+	if err != nil {
+		return common.Address{}, common.Hash{}, err
+	}
+
+	createSig := safeproxyfactory.SafeProxyFactorySig{
+		R: r,
+		S: s,
+		V: v2,
+	}
+
+	return v.deploySafeWithSig(v.chainID, v.config.SafeProxyFactory, paymentToken, payment, paymentReceiver, createSig, safeSigner)
+}
+
+// deploySafeWithSig deploys a Safe with the provided signature
+func (v *ContractInterfaceV2) deploySafeWithSig(chainID *big.Int, safeFactory, paymentToken common.Address, payment *big.Int, paymentReceiver common.Address, createSig safeproxyfactory.SafeProxyFactorySig, safeSigner signer.SafeTradingSigner) (safeProxy common.Address, txHash common.Hash, err error) {
+	typedData := BuildCreateProxyTypedData(chainID, safeFactory, paymentToken, payment, paymentReceiver)
+	typedDataHash, _, err := eip712.TypedDataAndHash(typedData)
+	if err != nil {
+		return
+	}
+
+	// Convert to signature bytes with V normalized to 0/1 for crypto.SigToPub
+	vNormalized := ethsig.DenormalizeV(createSig.V)
+	sigBytes := ethsig.ConvertRSV2SigBytes(createSig.R, createSig.S, vNormalized)
+
+	pubkey, err := crypto.SigToPub(typedDataHash, sigBytes)
+	if err != nil {
+		return
+	}
+
+	addr := crypto.PubkeyToAddress(*pubkey)
+	safeProxy, err = v.GetSafeAddress(addr)
+	if err != nil {
+		return
+	}
+
+	code, err := v.client.CodeAt(context.Background(), safeProxy, nil)
+	if err != nil {
+		return
+	}
+
+	if len(code) != 0 {
+		err = fmt.Errorf("already deployed")
+		return
+	}
+
+	// Use ABI Pack to encode createProxy call (same as V1)
+	zeroAddr := common.Address{}
+	factoryAbi, err := safeproxyfactory.SafeProxyFactoryMetaData.GetAbi()
+	if err != nil {
+		return
+	}
+
+	createProxyData, err := factoryAbi.Pack("createProxy", zeroAddr, big.NewInt(0), zeroAddr, createSig)
+	if err != nil {
+		return
+	}
+
+	txHash, err = v.executor.txSender.SendEthereumTransaction(v.config.SafeProxyFactory, createProxyData, big.NewInt(0))
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+// GetTransactionSender returns the transaction sender used by this contract interface
+func (v *ContractInterfaceV2) GetTransactionSender() sender.TransactionSender {
+	return v.executor.txSender
+}

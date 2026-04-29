@@ -35,16 +35,20 @@ func main() {
 	}
 
 	config := polymarketcontracts.GetContractConfig(polygonChainID)
-	v1, err := polymarketcontracts.NewContractInterface(
+
+	// V2 is self-contained, no V1 dependency needed
+	v2, err := polymarketcontracts.NewContractInterfaceV2(
 		client,
-		polymarketcontracts.WithContractConfig(config),
-		polymarketcontracts.WithSafeSigner(safeSigner),
+		config,
+		safeSigner,
+		polygonChainID,
 	)
 	if err != nil {
-		log.Fatalf("Failed to create V1 contract interface: %v", err)
+		log.Fatalf("Failed to create V2 contract interface: %v", err)
 	}
 
-	safeAddr, err := v1.GetSafeAddress(eoaAddress)
+	// Verify Safe is deployed (V2 has its own GetSafeAddress method)
+	safeAddr, err := v2.GetSafeAddress(eoaAddress)
 	if err != nil {
 		log.Fatalf("Failed to compute Safe address: %v", err)
 	}
@@ -56,17 +60,6 @@ func main() {
 	}
 	if len(code) == 0 {
 		log.Fatalf("Safe not deployed at %s. Deploy it first.", safeAddr.Hex())
-	}
-
-	v2, err := polymarketcontracts.NewContractInterfaceV2(
-		client,
-		config,
-		safeSigner,
-		v1.GetSafeAddress,
-		v1.ExecuteTransactionBySafeAndSingleSigner,
-	)
-	if err != nil {
-		log.Fatalf("Failed to create V2 contract interface: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

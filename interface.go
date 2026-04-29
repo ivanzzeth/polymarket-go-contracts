@@ -1873,3 +1873,8 @@ func BuildClobAuthTypedData(signer common.Address, chainID *big.Int, timestamp i
 		},
 	}
 }
+
+// GetTransactionSender returns the transaction sender used by this contract interface
+func (b *ContractInterface) GetTransactionSender() sender.TransactionSender {
+	return b.txSender
+}
