@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ivanzzeth/ethclient"
 	"github.com/ivanzzeth/polymarket-go-contracts/sender"
@@ -16,6 +17,15 @@ type contractCall struct {
 	Target   common.Address
 	Calldata []byte
 	Value    *big.Int
+}
+
+// toCallMsg converts contractCall to ethereum.CallMsg for eth_call simulation.
+func (c contractCall) toCallMsg() ethereum.CallMsg {
+	return ethereum.CallMsg{
+		To:    &c.Target,
+		Data:  c.Calldata,
+		Value: c.Value,
+	}
 }
 
 type txExecutor struct {

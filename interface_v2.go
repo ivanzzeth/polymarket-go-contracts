@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -21,6 +23,13 @@ import (
 	"github.com/ivanzzeth/polymarket-go-contracts/sender"
 	"github.com/ivanzzeth/polymarket-go-contracts/signer"
 )
+
+// TokenStatus tracks whether a token's wrap/unwrap operations are enabled.
+type TokenStatus struct {
+	WrapEnabled   bool
+	UnwrapEnabled bool
+	LastChecked   time.Time
+}
 
 // V2BalanceInfo holds pUSD and USDC.e balances plus V2-relevant allowances and approvals.
 type V2BalanceInfo struct {
@@ -59,6 +68,11 @@ type ContractInterfaceV2 struct {
 	ctfCollateralAdapter        *ctf_collateral_adapter.CtfCollateralAdapter
 	negRiskCtfCollateralAdapter *neg_risk_ctf_collateral_adapter.NegRiskCtfCollateralAdapter
 	permissionedRamp            *permissioned_ramp.PermissionedRamp
+
+	// Token status tracking (lazy refresh)
+	tokenStatusMu sync.RWMutex
+	tokenStatus   map[common.Address]*TokenStatus
+	statusTTL     time.Duration // Default 5 minutes
 }
 
 // NewContractInterfaceV2 creates a V2 interface. All V2 contract addresses in config must be non-zero.
@@ -121,7 +135,7 @@ func NewContractInterfaceV2(
 		return nil, fmt.Errorf("failed to create PermissionedRamp binding: %w", err)
 	}
 
-	return &ContractInterfaceV2{
+	v2 := &ContractInterfaceV2{
 		config: config,
 		client: client,
 		executor: &txExecutor{
@@ -141,7 +155,19 @@ func NewContractInterfaceV2(
 		ctfCollateralAdapter:        ctfAdapter,
 		negRiskCtfCollateralAdapter: nrCtfAdapter,
 		permissionedRamp:            pr,
-	}, nil
+		tokenStatus:                 make(map[common.Address]*TokenStatus),
+		statusTTL:                   5 * time.Minute,
+	}
+
+	// Initial token status check (non-blocking, just log warnings)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := v2.refreshTokenStatus(ctx); err != nil {
+		// Log warning but don't fail initialization
+		fmt.Printf("Warning: failed to refresh token status during initialization: %v\n", err)
+	}
+
+	return v2, nil
 }
 
 // --- Read operations ---
@@ -319,9 +345,49 @@ func (v *ContractInterfaceV2) validateWrapAsset(asset common.Address) error {
 	return nil
 }
 
+// validateWrapEnabled checks if wrap is currently enabled for the given asset.
+func (v *ContractInterfaceV2) validateWrapEnabled(asset common.Address) error {
+	status, exists := v.getTokenStatus(asset)
+	if !exists {
+		return fmt.Errorf("token status not initialized for %s", asset.Hex())
+	}
+	if !status.WrapEnabled {
+		tokenName := "USDC"
+		if asset == v.config.Collateral {
+			tokenName = "USDC.e"
+		}
+		return fmt.Errorf("%s wrap is currently paused by Polymarket contracts", tokenName)
+	}
+	return nil
+}
+
+// validateUnwrapEnabled checks if unwrap is currently enabled for the given asset.
+func (v *ContractInterfaceV2) validateUnwrapEnabled(asset common.Address) error {
+	status, exists := v.getTokenStatus(asset)
+	if !exists {
+		return fmt.Errorf("token status not initialized for %s", asset.Hex())
+	}
+	if !status.UnwrapEnabled {
+		tokenName := "USDC"
+		if asset == v.config.Collateral {
+			tokenName = "USDC.e"
+		}
+		return fmt.Errorf("%s unwrap is currently paused by Polymarket contracts", tokenName)
+	}
+	return nil
+}
+
 // WrapToPUSDForEOA wraps USDC.e to pUSD via the CollateralOnramp.
 func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
+		return common.Hash{}, err
+	}
+	// Lazy refresh token status
+	if err := v.ensureTokenStatus(ctx, asset); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
+	}
+	// Check if wrap is enabled
+	if err := v.validateWrapEnabled(asset); err != nil {
 		return common.Hash{}, err
 	}
 	call, err := buildWrapCall(v.config.CollateralOnramp, asset, to, amount)
@@ -336,6 +402,14 @@ func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner 
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
 	}
+	// Lazy refresh token status
+	if err := v.ensureTokenStatus(ctx, asset); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
+	}
+	// Check if wrap is enabled
+	if err := v.validateWrapEnabled(asset); err != nil {
+		return common.Hash{}, err
+	}
 	call, err := buildWrapCall(v.config.CollateralOnramp, asset, to, amount)
 	if err != nil {
 		return common.Hash{}, err
@@ -348,6 +422,14 @@ func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset co
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
 	}
+	// Lazy refresh token status
+	if err := v.ensureTokenStatus(ctx, asset); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
+	}
+	// Check if unwrap is enabled
+	if err := v.validateUnwrapEnabled(asset); err != nil {
+		return common.Hash{}, err
+	}
 	call, err := buildUnwrapCall(v.config.CollateralOfframp, asset, to, amount)
 	if err != nil {
 		return common.Hash{}, err
@@ -358,6 +440,14 @@ func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset co
 // UnwrapFromPUSDForSafe unwraps pUSD to USDC.e via Safe.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
+		return common.Hash{}, err
+	}
+	// Lazy refresh token status
+	if err := v.ensureTokenStatus(ctx, asset); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
+	}
+	// Check if unwrap is enabled
+	if err := v.validateUnwrapEnabled(asset); err != nil {
 		return common.Hash{}, err
 	}
 	call, err := buildUnwrapCall(v.config.CollateralOfframp, asset, to, amount)
@@ -478,3 +568,90 @@ func (v *ContractInterfaceV2) RedeemPositionsNegRiskForSafe(ctx context.Context,
 	}
 	return v.executor.executeSafe(safeSigner, chainID, call)
 }
+
+// --- Token Status Tracking ---
+
+// checkTokenWrapStatus checks if wrap is paused for the given token.
+// Returns true if wrap is enabled, false if paused.
+func (v *ContractInterfaceV2) checkTokenWrapStatus(ctx context.Context, asset common.Address) bool {
+	opts := &bind.CallOpts{Context: ctx}
+	paused, err := v.collateralOnramp.Paused(opts, asset)
+	if err != nil {
+		// Error querying - assume enabled (optimistic)
+		return true
+	}
+	return !paused // paused=true means disabled, so return !paused
+}
+
+// checkTokenUnwrapStatus checks if unwrap is paused for the given token.
+// Returns true if unwrap is enabled, false if paused.
+func (v *ContractInterfaceV2) checkTokenUnwrapStatus(ctx context.Context, asset common.Address) bool {
+	opts := &bind.CallOpts{Context: ctx}
+	paused, err := v.collateralOfframp.Paused(opts, asset)
+	if err != nil {
+		// Error querying - assume enabled (optimistic)
+		return true
+	}
+	return !paused // paused=true means disabled, so return !paused
+}
+
+// refreshTokenStatus checks wrap/unwrap status for all supported tokens.
+func (v *ContractInterfaceV2) refreshTokenStatus(ctx context.Context) error {
+	v.tokenStatusMu.Lock()
+	defer v.tokenStatusMu.Unlock()
+
+	now := time.Now()
+
+	// Check USDC.e
+	usdceStatus := &TokenStatus{
+		WrapEnabled:   v.checkTokenWrapStatus(ctx, v.config.Collateral),
+		UnwrapEnabled: v.checkTokenUnwrapStatus(ctx, v.config.Collateral),
+		LastChecked:   now,
+	}
+	v.tokenStatus[v.config.Collateral] = usdceStatus
+
+	// Check USDC if configured
+	if v.config.USDC != (common.Address{}) {
+		usdcStatus := &TokenStatus{
+			WrapEnabled:   v.checkTokenWrapStatus(ctx, v.config.USDC),
+			UnwrapEnabled: v.checkTokenUnwrapStatus(ctx, v.config.USDC),
+			LastChecked:   now,
+		}
+		v.tokenStatus[v.config.USDC] = usdcStatus
+	}
+
+	return nil
+}
+
+// ensureTokenStatus checks if token status needs refresh (lazy refresh).
+// If last check was longer than TTL ago, refreshes the status.
+func (v *ContractInterfaceV2) ensureTokenStatus(ctx context.Context, asset common.Address) error {
+	v.tokenStatusMu.RLock()
+	status, exists := v.tokenStatus[asset]
+	needsRefresh := !exists || time.Since(status.LastChecked) > v.statusTTL
+	v.tokenStatusMu.RUnlock()
+
+	if needsRefresh {
+		return v.refreshTokenStatus(ctx)
+	}
+	return nil
+}
+
+// getTokenStatus returns the current token status (wrap/unwrap enabled).
+func (v *ContractInterfaceV2) getTokenStatus(asset common.Address) (*TokenStatus, bool) {
+	v.tokenStatusMu.RLock()
+	defer v.tokenStatusMu.RUnlock()
+	status, exists := v.tokenStatus[asset]
+	return status, exists
+}
+
+// RefreshTokenStatus manually refreshes token status (exposed for manual refresh).
+func (v *ContractInterfaceV2) RefreshTokenStatus(ctx context.Context) error {
+	return v.refreshTokenStatus(ctx)
+}
+
+// GetTokenStatus returns the current token status (wrap/unwrap enabled) - exported for testing.
+func (v *ContractInterfaceV2) GetTokenStatus(asset common.Address) (*TokenStatus, bool) {
+	return v.getTokenStatus(asset)
+}
+
