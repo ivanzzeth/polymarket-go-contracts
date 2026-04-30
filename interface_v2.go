@@ -89,6 +89,33 @@ type ContractInterfaceV2 struct {
 	tokenStatusMu sync.RWMutex
 	tokenStatus   map[common.Address]*TokenStatus
 	statusTTL     time.Duration // Default 5 minutes
+
+	// Optional auto-routing fields (set via functional options)
+	signatureType     SignatureType
+	safeTradingSigner signer.SafeTradingSigner
+}
+
+// ContractInterfaceV2Option configures optional fields on ContractInterfaceV2.
+type ContractInterfaceV2Option func(*ContractInterfaceV2)
+
+// WithV2SignatureType sets the signature type for auto-routing convenience methods.
+// When using SignatureTypePolyGnosisSafe, you must also pass WithV2SafeSigner.
+func WithV2SignatureType(st SignatureType) ContractInterfaceV2Option {
+	return func(v *ContractInterfaceV2) {
+		v.signatureType = st
+	}
+}
+
+// WithV2SafeSigner sets the Safe trading signer and automatically sets
+// signatureType to SignatureTypePolyGnosisSafe.
+func WithV2SafeSigner(s signer.SafeTradingSigner) ContractInterfaceV2Option {
+	return func(v *ContractInterfaceV2) {
+		if s == nil {
+			return
+		}
+		v.safeTradingSigner = s
+		v.signatureType = SignatureTypePolyGnosisSafe
+	}
 }
 
 // NewContractInterfaceV2 creates a V2 interface. All V2 contract addresses in config must be non-zero.
@@ -98,6 +125,7 @@ func NewContractInterfaceV2(
 	config *ContractConfig,
 	txSender sender.TransactionSender,
 	chainID *big.Int,
+	opts ...ContractInterfaceV2Option,
 ) (*ContractInterfaceV2, error) {
 	if config.ExchangeV2 == (common.Address{}) {
 		return nil, fmt.Errorf("V2 not configured: ExchangeV2 address is zero")
@@ -182,6 +210,10 @@ func NewContractInterfaceV2(
 
 		tokenStatus: make(map[common.Address]*TokenStatus),
 		statusTTL:   5 * time.Minute,
+	}
+
+	for _, opt := range opts {
+		opt(v2)
 	}
 
 	// Create executor using v2's own methods (no dependency on V1)
@@ -297,6 +329,12 @@ func (v *ContractInterfaceV2) CollateralOfframp() *collateral_offramp.Collateral
 func (v *ContractInterfaceV2) CtfCollateralAdapter() *ctf_collateral_adapter.CtfCollateralAdapter { return v.ctfCollateralAdapter }
 func (v *ContractInterfaceV2) NegRiskCtfCollateralAdapter() *neg_risk_ctf_collateral_adapter.NegRiskCtfCollateralAdapter { return v.negRiskCtfCollateralAdapter }
 func (v *ContractInterfaceV2) PermissionedRamp() *permissioned_ramp.PermissionedRamp { return v.permissionedRamp }
+
+func (v *ContractInterfaceV2) GetConfig() *ContractConfig                              { return v.config }
+func (v *ContractInterfaceV2) GetClient() ethclient.EthClientInterface                 { return v.client }
+func (v *ContractInterfaceV2) GetSafeProxyFactory() *safeproxyfactory.SafeProxyFactory { return v.safeProxyFactory }
+func (v *ContractInterfaceV2) GetSignatureType() SignatureType                         { return v.signatureType }
+func (v *ContractInterfaceV2) GetChainID() *big.Int                                    { return v.chainID }
 
 // --- EnableTrading ---
 
@@ -416,18 +454,57 @@ func (v *ContractInterfaceV2) validateUnwrapEnabled(asset common.Address) error 
 	return nil
 }
 
-// WrapToPUSDForEOA wraps USDC.e to pUSD via the CollateralOnramp.
+// getEOAAddress returns the EOA address from txSender via type assertion.
+func (v *ContractInterfaceV2) getEOAAddress() (common.Address, error) {
+	type addressGetter interface {
+		GetAddress() common.Address
+	}
+	if ag, ok := v.executor.txSender.(addressGetter); ok {
+		return ag.GetAddress(), nil
+	}
+	return common.Address{}, fmt.Errorf("txSender does not implement GetAddress; amount must be specified explicitly")
+}
+
+// resolveAssetBalance queries the on-chain balance of asset for addr.
+// Used to resolve nil amount (wrap/unwrap full balance).
+func (v *ContractInterfaceV2) resolveAssetBalance(ctx context.Context, addr, asset common.Address) (*big.Int, error) {
+	opts := &bind.CallOpts{Context: ctx}
+	if asset == v.config.Collateral {
+		return v.usdce.BalanceOf(opts, addr)
+	}
+	if v.usdc != nil && asset == v.config.USDC {
+		return v.usdc.BalanceOf(opts, addr)
+	}
+	return nil, fmt.Errorf("unknown asset %s for balance query", asset.Hex())
+}
+
+// resolvePUSDBalance queries the on-chain pUSD balance for addr.
+func (v *ContractInterfaceV2) resolvePUSDBalance(ctx context.Context, addr common.Address) (*big.Int, error) {
+	opts := &bind.CallOpts{Context: ctx}
+	return v.collateralToken.BalanceOf(opts, addr)
+}
+
+// WrapToPUSDForEOA wraps USDC/USDC.e to pUSD via the CollateralOnramp.
+// If amount is nil, wraps the sender's entire asset balance.
 func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
 	}
-	// Lazy refresh token status
 	if err := v.ensureTokenStatus(ctx, asset); err != nil {
 		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
 	}
-	// Check if wrap is enabled
 	if err := v.validateWrapEnabled(asset); err != nil {
 		return common.Hash{}, err
+	}
+	if amount == nil {
+		addr, err := v.getEOAAddress()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		amount, err = v.resolveAssetBalance(ctx, addr, asset)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to resolve full balance for wrap: %w", err)
+		}
 	}
 	call, err := buildWrapCall(v.config.CollateralOnramp, asset, to, amount)
 	if err != nil {
@@ -436,18 +513,27 @@ func (v *ContractInterfaceV2) WrapToPUSDForEOA(ctx context.Context, asset common
 	return v.executor.executeEOA(call)
 }
 
-// WrapToPUSDForSafe wraps USDC.e to pUSD via Safe.
+// WrapToPUSDForSafe wraps USDC/USDC.e to pUSD via Safe.
+// If amount is nil, wraps the Safe's entire asset balance.
 func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
 	}
-	// Lazy refresh token status
 	if err := v.ensureTokenStatus(ctx, asset); err != nil {
 		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
 	}
-	// Check if wrap is enabled
 	if err := v.validateWrapEnabled(asset); err != nil {
 		return common.Hash{}, err
+	}
+	if amount == nil {
+		safeAddr, err := v.GetSafeAddress(safeSigner.GetAddress())
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to get safe address for balance: %w", err)
+		}
+		amount, err = v.resolveAssetBalance(ctx, safeAddr, asset)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to resolve full balance for wrap: %w", err)
+		}
 	}
 	call, err := buildWrapCall(v.config.CollateralOnramp, asset, to, amount)
 	if err != nil {
@@ -456,18 +542,27 @@ func (v *ContractInterfaceV2) WrapToPUSDForSafe(ctx context.Context, safeSigner 
 	return v.executor.executeSafe(safeSigner, chainID, call)
 }
 
-// UnwrapFromPUSDForEOA unwraps pUSD to USDC.e via the CollateralOfframp.
+// UnwrapFromPUSDForEOA unwraps pUSD to USDC/USDC.e via the CollateralOfframp.
+// If amount is nil, unwraps the sender's entire pUSD balance.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
 	}
-	// Lazy refresh token status
 	if err := v.ensureTokenStatus(ctx, asset); err != nil {
 		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
 	}
-	// Check if unwrap is enabled
 	if err := v.validateUnwrapEnabled(asset); err != nil {
 		return common.Hash{}, err
+	}
+	if amount == nil {
+		addr, err := v.getEOAAddress()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		amount, err = v.resolvePUSDBalance(ctx, addr)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to resolve full pUSD balance for unwrap: %w", err)
+		}
 	}
 	call, err := buildUnwrapCall(v.config.CollateralOfframp, asset, to, amount)
 	if err != nil {
@@ -476,18 +571,27 @@ func (v *ContractInterfaceV2) UnwrapFromPUSDForEOA(ctx context.Context, asset co
 	return v.executor.executeEOA(call)
 }
 
-// UnwrapFromPUSDForSafe unwraps pUSD to USDC.e via Safe.
+// UnwrapFromPUSDForSafe unwraps pUSD to USDC/USDC.e via Safe.
+// If amount is nil, unwraps the Safe's entire pUSD balance.
 func (v *ContractInterfaceV2) UnwrapFromPUSDForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
 	if err := v.validateWrapAsset(asset); err != nil {
 		return common.Hash{}, err
 	}
-	// Lazy refresh token status
 	if err := v.ensureTokenStatus(ctx, asset); err != nil {
 		return common.Hash{}, fmt.Errorf("failed to refresh token status: %w", err)
 	}
-	// Check if unwrap is enabled
 	if err := v.validateUnwrapEnabled(asset); err != nil {
 		return common.Hash{}, err
+	}
+	if amount == nil {
+		safeAddr, err := v.GetSafeAddress(safeSigner.GetAddress())
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to get safe address for balance: %w", err)
+		}
+		amount, err = v.resolvePUSDBalance(ctx, safeAddr)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("failed to resolve full pUSD balance for unwrap: %w", err)
+		}
 	}
 	call, err := buildUnwrapCall(v.config.CollateralOfframp, asset, to, amount)
 	if err != nil {
@@ -606,6 +710,157 @@ func (v *ContractInterfaceV2) RedeemPositionsNegRiskForSafe(ctx context.Context,
 		return common.Hash{}, err
 	}
 	return v.executor.executeSafe(safeSigner, chainID, call)
+}
+
+// --- Auto-routing convenience methods ---
+// These methods dispatch to ForEOA or ForSafe based on signatureType.
+// Set via WithV2SafeSigner or WithV2SignatureType options.
+
+func (v *ContractInterfaceV2) getSafeTradingSignerOrErr() (signer.SafeTradingSigner, error) {
+	if v.safeTradingSigner == nil {
+		return nil, fmt.Errorf("safe trading signer not configured: use WithV2SafeSigner option")
+	}
+	return v.safeTradingSigner, nil
+}
+
+func (v *ContractInterfaceV2) EnableTrading(ctx context.Context) ([]common.Hash, error) {
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return nil, err
+		}
+		return v.EnableTradingForSafe(ctx, s, v.chainID)
+	case SignatureTypeEOA:
+		return v.EnableTradingForEOA(ctx)
+	default:
+		return nil, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) Split(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.SplitPositionForSafe(ctx, s, v.chainID, conditionId, partition, amount)
+	case SignatureTypeEOA:
+		return v.SplitPositionForEOA(ctx, conditionId, partition, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) Merge(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.MergePositionsForSafe(ctx, s, v.chainID, conditionId, partition, amount)
+	case SignatureTypeEOA:
+		return v.MergePositionsForEOA(ctx, conditionId, partition, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) Redeem(ctx context.Context, conditionId [32]byte) (common.Hash, error) {
+	indexSets := []*big.Int{big.NewInt(1), big.NewInt(2)}
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.RedeemPositionsForSafe(ctx, s, v.chainID, conditionId, indexSets)
+	case SignatureTypeEOA:
+		return v.RedeemPositionsForEOA(ctx, conditionId, indexSets)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) SplitNegRisk(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.SplitPositionNegRiskForSafe(ctx, s, v.chainID, conditionId, partition, amount)
+	case SignatureTypeEOA:
+		return v.SplitPositionNegRiskForEOA(ctx, conditionId, partition, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) MergeNegRisk(ctx context.Context, conditionId [32]byte, amount *big.Int) (common.Hash, error) {
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.MergePositionsNegRiskForSafe(ctx, s, v.chainID, conditionId, partition, amount)
+	case SignatureTypeEOA:
+		return v.MergePositionsNegRiskForEOA(ctx, conditionId, partition, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) RedeemNegRisk(ctx context.Context, conditionId [32]byte, amounts []*big.Int) (common.Hash, error) {
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.RedeemPositionsNegRiskForSafe(ctx, s, v.chainID, conditionId, amounts)
+	case SignatureTypeEOA:
+		return v.RedeemPositionsNegRiskForEOA(ctx, conditionId, amounts)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) WrapToPUSD(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.WrapToPUSDForSafe(ctx, s, v.chainID, asset, to, amount)
+	case SignatureTypeEOA:
+		return v.WrapToPUSDForEOA(ctx, asset, to, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
+}
+
+func (v *ContractInterfaceV2) UnwrapFromPUSD(ctx context.Context, asset common.Address, to common.Address, amount *big.Int) (common.Hash, error) {
+	switch v.signatureType {
+	case SignatureTypePolyGnosisSafe:
+		s, err := v.getSafeTradingSignerOrErr()
+		if err != nil {
+			return common.Hash{}, err
+		}
+		return v.UnwrapFromPUSDForSafe(ctx, s, v.chainID, asset, to, amount)
+	case SignatureTypeEOA:
+		return v.UnwrapFromPUSDForEOA(ctx, asset, to, amount)
+	default:
+		return common.Hash{}, fmt.Errorf("unsupported signature type: %v", v.signatureType)
+	}
 }
 
 // --- Token Status Tracking ---
