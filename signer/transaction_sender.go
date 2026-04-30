@@ -10,12 +10,13 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind/v2"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	ethclient "github.com/ivanzzeth/ethclient"
 	"github.com/ivanzzeth/ethsig"
 	"github.com/ivanzzeth/polymarket-go-contracts/sender"
 )
 
 // GetTransactionSenderBySigner creates a TransactionSender based on the signer type
-func GetTransactionSenderBySigner(chainId *big.Int, client bind.ContractBackend, signerInstance any) (sender.TransactionSender, error) {
+func GetTransactionSenderBySigner(chainId *big.Int, client ethclient.EthClientInterface, signerInstance any) (sender.TransactionSender, error) {
 	switch s := signerInstance.(type) {
 	case *CoboMpcSigner:
 		return GetTransactionSenderByCoboMpcTransactionSender(client, s)
@@ -35,12 +36,12 @@ type TransactionSignerAndAddrGetter interface {
 // TransactionSenderByTransactionSigner implements TransactionSender using a transaction signer
 type TransactionSenderByTransactionSigner struct {
 	chainId  *big.Int
-	client   bind.ContractBackend
+	client   ethclient.EthClientInterface
 	txSigner TransactionSignerAndAddrGetter
 }
 
 // GetTransactionSenderByTransactionSignerAndAddrGetter creates a TransactionSender from a transaction signer
-func GetTransactionSenderByTransactionSignerAndAddrGetter(chainId *big.Int, client bind.ContractBackend, txSigner TransactionSignerAndAddrGetter) (sender.TransactionSender, error) {
+func GetTransactionSenderByTransactionSignerAndAddrGetter(chainId *big.Int, client ethclient.EthClientInterface, txSigner TransactionSignerAndAddrGetter) (sender.TransactionSender, error) {
 	return &TransactionSenderByTransactionSigner{chainId: chainId, client: client, txSigner: txSigner}, nil
 }
 
@@ -48,8 +49,8 @@ func GetTransactionSenderByTransactionSignerAndAddrGetter(chainId *big.Int, clie
 func (s *TransactionSenderByTransactionSigner) SendEthereumTransaction(to common.Address, data []byte, value *big.Int) (common.Hash, error) {
 	ctx := context.Background()
 
-	// Get nonce
-	nonce, err := s.client.PendingNonceAt(ctx, s.txSigner.GetAddress())
+	// Get confirmed nonce (not pending) to avoid stuck nonce gaps
+	nonce, err := s.client.NonceAt(ctx, s.txSigner.GetAddress(), nil)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to get nonce: %w", err)
 	}

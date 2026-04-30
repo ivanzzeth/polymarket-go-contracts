@@ -338,9 +338,27 @@ func (v *ContractInterfaceV2) GetChainID() *big.Int                             
 
 // --- EnableTrading ---
 
+// EnableTradingOption configures optional behavior for EnableTrading methods.
+type EnableTradingOption func(*enableTradingConfig)
+
+type enableTradingConfig struct {
+	autoWrapToPUSD bool
+}
+
+// WithAutoWrapToPUSD wraps all USDC and USDC.e balances to pUSD after approvals.
+func WithAutoWrapToPUSD() EnableTradingOption {
+	return func(c *enableTradingConfig) {
+		c.autoWrapToPUSD = true
+	}
+}
+
 // EnableTradingForEOA approves pUSD to adapters/offramp and sets CTF approvals for V2 exchanges/adapters.
-func (v *ContractInterfaceV2) EnableTradingForEOA(ctx context.Context) ([]common.Hash, error) {
-	calls, err := v.enableTradingCalls()
+func (v *ContractInterfaceV2) EnableTradingForEOA(ctx context.Context, opts ...EnableTradingOption) ([]common.Hash, error) {
+	addr, err := v.getEOAAddress()
+	if err != nil {
+		return nil, err
+	}
+	calls, err := v.enableTradingCalls(ctx, addr, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -348,15 +366,24 @@ func (v *ContractInterfaceV2) EnableTradingForEOA(ctx context.Context) ([]common
 }
 
 // EnableTradingForSafe approves pUSD to adapters/offramp and sets CTF approvals for V2 exchanges/adapters via Safe.
-func (v *ContractInterfaceV2) EnableTradingForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int) ([]common.Hash, error) {
-	calls, err := v.enableTradingCalls()
+func (v *ContractInterfaceV2) EnableTradingForSafe(ctx context.Context, safeSigner signer.SafeTradingSigner, chainID *big.Int, opts ...EnableTradingOption) ([]common.Hash, error) {
+	safeAddr, err := v.GetSafeAddress(safeSigner.GetAddress())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Safe address: %w", err)
+	}
+	calls, err := v.enableTradingCalls(ctx, safeAddr, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return v.executor.executeBatchSafe(safeSigner, chainID, calls)
 }
 
-func (v *ContractInterfaceV2) enableTradingCalls() ([]contractCall, error) {
+func (v *ContractInterfaceV2) enableTradingCalls(ctx context.Context, address common.Address, opts ...EnableTradingOption) ([]contractCall, error) {
+	cfg := &enableTradingConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	maxApproval := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 
 	var calls []contractCall
@@ -407,6 +434,40 @@ func (v *ContractInterfaceV2) enableTradingCalls() ([]contractCall, error) {
 		}
 		calls = append(calls, call)
 	}
+
+	// Auto-wrap USDC/USDC.e to pUSD if requested
+	if cfg.autoWrapToPUSD {
+		callOpts := &bind.CallOpts{Context: ctx}
+
+		// Wrap USDC.e if balance > 0
+		usdceBal, err := v.usdce.BalanceOf(callOpts, address)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get USDC.e balance for auto-wrap: %w", err)
+		}
+		if usdceBal.Sign() > 0 {
+			wrapCall, err := buildWrapCall(v.config.CollateralOnramp, v.config.Collateral, address, usdceBal)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build USDC.e wrap call: %w", err)
+			}
+			calls = append(calls, wrapCall)
+		}
+
+		// Wrap native USDC if balance > 0
+		if v.usdc != nil {
+			usdcBal, err := v.usdc.BalanceOf(callOpts, address)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get USDC balance for auto-wrap: %w", err)
+			}
+			if usdcBal.Sign() > 0 {
+				wrapCall, err := buildWrapCall(v.config.CollateralOnramp, v.config.USDC, address, usdcBal)
+				if err != nil {
+					return nil, fmt.Errorf("failed to build USDC wrap call: %w", err)
+				}
+				calls = append(calls, wrapCall)
+			}
+		}
+	}
+
 	return calls, nil
 }
 
@@ -723,16 +784,16 @@ func (v *ContractInterfaceV2) getSafeTradingSignerOrErr() (signer.SafeTradingSig
 	return v.safeTradingSigner, nil
 }
 
-func (v *ContractInterfaceV2) EnableTrading(ctx context.Context) ([]common.Hash, error) {
+func (v *ContractInterfaceV2) EnableTrading(ctx context.Context, opts ...EnableTradingOption) ([]common.Hash, error) {
 	switch v.signatureType {
 	case SignatureTypePolyGnosisSafe:
 		s, err := v.getSafeTradingSignerOrErr()
 		if err != nil {
 			return nil, err
 		}
-		return v.EnableTradingForSafe(ctx, s, v.chainID)
+		return v.EnableTradingForSafe(ctx, s, v.chainID, opts...)
 	case SignatureTypeEOA:
-		return v.EnableTradingForEOA(ctx)
+		return v.EnableTradingForEOA(ctx, opts...)
 	default:
 		return nil, fmt.Errorf("unsupported signature type: %v", v.signatureType)
 	}

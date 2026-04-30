@@ -4,7 +4,7 @@ import (
 	"crypto/ecdsa"
 	"math/big"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind/v2"
+	ethclient "github.com/ivanzzeth/ethclient"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ivanzzeth/ethsig"
 	"github.com/ivanzzeth/ethsig/eip712"
@@ -53,10 +53,10 @@ func (s *SimpleSafeTradingSigner) SendEthereumTransaction(to common.Address, dat
 type SafeTradingSingleMpcSigner struct {
 	*SimpleSafeTradingSigner
 	chainId *big.Int
-	client  bind.ContractBackend
+	client  ethclient.EthClientInterface
 }
 
-func NewSafeTradingSingleMpcSigner(chainId *big.Int, client bind.ContractBackend, signer *CoboMpcSigner) (*SafeTradingSingleMpcSigner, error) {
+func NewSafeTradingSingleMpcSigner(chainId *big.Int, client ethclient.EthClientInterface, signer *CoboMpcSigner) (*SafeTradingSingleMpcSigner, error) {
 	txSender, err := GetTransactionSenderBySigner(chainId, client, signer)
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func NewSafeTradingSingleMpcSigner(chainId *big.Int, client bind.ContractBackend
 }
 
 // NewSafeTradingPrivateKeySigner creates a SafeTradingSigner from a private key
-func NewSafeTradingPrivateKeySigner(chainId *big.Int, client bind.ContractBackend, privateKey *ecdsa.PrivateKey) (*SimpleSafeTradingSigner, error) {
+func NewSafeTradingPrivateKeySigner(chainId *big.Int, client ethclient.EthClientInterface, privateKey *ecdsa.PrivateKey) (*SimpleSafeTradingSigner, error) {
 	signer := ethsig.NewEthPrivateKeySigner(privateKey)
 	txSender, err := GetTransactionSenderBySigner(chainId, client, signer)
 	if err != nil {
@@ -81,7 +81,7 @@ func NewSafeTradingPrivateKeySigner(chainId *big.Int, client bind.ContractBacken
 }
 
 // NewSafeTradingPrivateKeySignerFromHex creates a SafeTradingSigner from a private key hex string
-func NewSafeTradingPrivateKeySignerFromHex(chainId *big.Int, client bind.ContractBackend, privateKeyHex string) (*SimpleSafeTradingSigner, error) {
+func NewSafeTradingPrivateKeySignerFromHex(chainId *big.Int, client ethclient.EthClientInterface, privateKeyHex string) (*SimpleSafeTradingSigner, error) {
 	signer, err := ethsig.NewEthPrivateKeySignerFromPrivateKeyHex(privateKeyHex)
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func NewSafeTradingPrivateKeySignerFromHex(chainId *big.Int, client bind.Contrac
 }
 
 // NewSafeTradingKeystoreSignerFromPath creates a SafeTradingSigner from a keystore file or directory
-func NewSafeTradingKeystoreSignerFromPath(chainId *big.Int, client bind.ContractBackend, keystorePath string, address common.Address, password string, scryptConfig *ethsig.KeystoreScryptConfig) (*SimpleSafeTradingSigner, error) {
+func NewSafeTradingKeystoreSignerFromPath(chainId *big.Int, client ethclient.EthClientInterface, keystorePath string, address common.Address, password string, scryptConfig *ethsig.KeystoreScryptConfig) (*SimpleSafeTradingSigner, error) {
 	signer, err := ethsig.NewKeystoreSignerFromPath(keystorePath, address, password, scryptConfig)
 	if err != nil {
 		return nil, err
@@ -111,7 +111,7 @@ func NewSafeTradingKeystoreSignerFromPath(chainId *big.Int, client bind.Contract
 }
 
 // NewSafeTradingKeystoreSignerFromFile creates a SafeTradingSigner from a keystore file
-func NewSafeTradingKeystoreSignerFromFile(chainId *big.Int, client bind.ContractBackend, keystoreFile string, address common.Address, password string, scryptConfig *ethsig.KeystoreScryptConfig) (*SimpleSafeTradingSigner, error) {
+func NewSafeTradingKeystoreSignerFromFile(chainId *big.Int, client ethclient.EthClientInterface, keystoreFile string, address common.Address, password string, scryptConfig *ethsig.KeystoreScryptConfig) (*SimpleSafeTradingSigner, error) {
 	signer, err := ethsig.NewKeystoreSignerFromFile(keystoreFile, address, password, scryptConfig)
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func NewSafeTradingKeystoreSignerFromFile(chainId *big.Int, client bind.Contract
 }
 
 // NewSafeTradingKeystoreSignerFromDirectory creates a SafeTradingSigner from a keystore directory
-func NewSafeTradingKeystoreSignerFromDirectory(chainId *big.Int, client bind.ContractBackend, keystoreDir string, address common.Address, password string, scryptConfig *ethsig.KeystoreScryptConfig) (*SimpleSafeTradingSigner, error) {
+func NewSafeTradingKeystoreSignerFromDirectory(chainId *big.Int, client ethclient.EthClientInterface, keystoreDir string, address common.Address, password string, scryptConfig *ethsig.KeystoreScryptConfig) (*SimpleSafeTradingSigner, error) {
 	signer, err := ethsig.NewKeystoreSignerFromDirectory(keystoreDir, address, password, scryptConfig)
 	if err != nil {
 		return nil, err
