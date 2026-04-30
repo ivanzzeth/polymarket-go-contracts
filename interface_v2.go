@@ -50,6 +50,8 @@ type V2BalanceInfo struct {
 	USDCAllowanceOnramp  *big.Int
 	USDCEAllowanceOnramp *big.Int
 
+	PUSDAllowanceExchangeV2        *big.Int
+	PUSDAllowanceNegRiskExchangeV2 *big.Int
 	PUSDAllowanceCtfAdapter        *big.Int
 	PUSDAllowanceNegRiskCtfAdapter *big.Int
 	PUSDAllowanceOfframp           *big.Int
@@ -277,6 +279,14 @@ func (v *ContractInterfaceV2) GetBalancesAtBlock(ctx context.Context, address co
 		}
 	}
 
+	info.PUSDAllowanceExchangeV2, err = v.collateralToken.Allowance(opts, address, v.config.ExchangeV2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pUSD allowance for ExchangeV2: %w", err)
+	}
+	info.PUSDAllowanceNegRiskExchangeV2, err = v.collateralToken.Allowance(opts, address, v.config.NegRiskExchangeV2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pUSD allowance for NegRiskExchangeV2: %w", err)
+	}
 	info.PUSDAllowanceCtfAdapter, err = v.collateralToken.Allowance(opts, address, v.config.CtfCollateralAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pUSD allowance for CtfCollateralAdapter: %w", err)
@@ -384,87 +394,99 @@ func (v *ContractInterfaceV2) enableTradingCalls(ctx context.Context, address co
 		opt(cfg)
 	}
 
-	maxApproval := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
-
-	var calls []contractCall
-
-	// USDC.e approve → CollateralOnramp (needed for wrap: USDC.e → pUSD)
-	usdceApproveCall, err := buildERC20ApproveCall(v.config.Collateral, v.config.CollateralOnramp, maxApproval)
+	info, err := v.GetBalances(ctx, address)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build USDC.e approve for CollateralOnramp: %w", err)
-	}
-	calls = append(calls, usdceApproveCall)
-
-	// USDC (native) approve → CollateralOnramp (needed for wrap: USDC → pUSD)
-	if v.config.USDC != (common.Address{}) {
-		usdcApproveCall, err := buildERC20ApproveCall(v.config.USDC, v.config.CollateralOnramp, maxApproval)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build USDC approve for CollateralOnramp: %w", err)
-		}
-		calls = append(calls, usdcApproveCall)
+		return nil, fmt.Errorf("failed to check current allowances: %w", err)
 	}
 
-	// pUSD approve → exchanges + adapters + offramp
-	pUSDApproveTargets := []common.Address{
-		v.config.ExchangeV2,
-		v.config.NegRiskExchangeV2,
-		v.config.CtfCollateralAdapter,
-		v.config.NegRiskCtfCollateralAdapter,
-		v.config.CollateralOfframp,
-	}
-	for _, spender := range pUSDApproveTargets {
-		call, err := buildERC20ApproveCall(v.config.CollateralToken, spender, maxApproval)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build pUSD approve for %s: %w", spender.Hex(), err)
-		}
-		calls = append(calls, call)
-	}
-
-	// CTF setApprovalForAll → exchanges + adapters
-	ctfApprovalTargets := []common.Address{
-		v.config.ExchangeV2,
-		v.config.NegRiskExchangeV2,
-		v.config.CtfCollateralAdapter,
-		v.config.NegRiskCtfCollateralAdapter,
-	}
-	for _, operator := range ctfApprovalTargets {
-		call, err := buildSetApprovalForAllCall(v.config.ConditionalTokens, operator, true)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build CTF setApprovalForAll for %s: %w", operator.Hex(), err)
-		}
-		calls = append(calls, call)
+	calls, err := v.buildEnableTradingCalls(info)
+	if err != nil {
+		return nil, err
 	}
 
 	// Auto-wrap USDC/USDC.e to pUSD if requested
 	if cfg.autoWrapToPUSD {
-		callOpts := &bind.CallOpts{Context: ctx}
-
-		// Wrap USDC.e if balance > 0
-		usdceBal, err := v.usdce.BalanceOf(callOpts, address)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get USDC.e balance for auto-wrap: %w", err)
-		}
-		if usdceBal.Sign() > 0 {
-			wrapCall, err := buildWrapCall(v.config.CollateralOnramp, v.config.Collateral, address, usdceBal)
+		if info.USDCEBalance != nil && info.USDCEBalance.Sign() > 0 {
+			wrapCall, err := buildWrapCall(v.config.CollateralOnramp, v.config.Collateral, address, info.USDCEBalance)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build USDC.e wrap call: %w", err)
 			}
 			calls = append(calls, wrapCall)
 		}
 
-		// Wrap native USDC if balance > 0
-		if v.usdc != nil {
-			usdcBal, err := v.usdc.BalanceOf(callOpts, address)
+		if info.USDCBalance != nil && info.USDCBalance.Sign() > 0 {
+			wrapCall, err := buildWrapCall(v.config.CollateralOnramp, v.config.USDC, address, info.USDCBalance)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get USDC balance for auto-wrap: %w", err)
+				return nil, fmt.Errorf("failed to build USDC wrap call: %w", err)
 			}
-			if usdcBal.Sign() > 0 {
-				wrapCall, err := buildWrapCall(v.config.CollateralOnramp, v.config.USDC, address, usdcBal)
-				if err != nil {
-					return nil, fmt.Errorf("failed to build USDC wrap call: %w", err)
-				}
-				calls = append(calls, wrapCall)
+			calls = append(calls, wrapCall)
+		}
+	}
+
+	return calls, nil
+}
+
+func (v *ContractInterfaceV2) buildEnableTradingCalls(info *V2BalanceInfo) ([]contractCall, error) {
+	maxApproval := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	zero := big.NewInt(0)
+	needsApproval := func(current *big.Int) bool {
+		return current == nil || current.Cmp(zero) == 0
+	}
+
+	var calls []contractCall
+
+	if needsApproval(info.USDCEAllowanceOnramp) {
+		call, err := buildERC20ApproveCall(v.config.Collateral, v.config.CollateralOnramp, maxApproval)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build USDC.e approve for CollateralOnramp: %w", err)
+		}
+		calls = append(calls, call)
+	}
+
+	if v.config.USDC != (common.Address{}) && needsApproval(info.USDCAllowanceOnramp) {
+		call, err := buildERC20ApproveCall(v.config.USDC, v.config.CollateralOnramp, maxApproval)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build USDC approve for CollateralOnramp: %w", err)
+		}
+		calls = append(calls, call)
+	}
+
+	pUSDApprovals := []struct {
+		spender common.Address
+		current *big.Int
+	}{
+		{v.config.ExchangeV2, info.PUSDAllowanceExchangeV2},
+		{v.config.NegRiskExchangeV2, info.PUSDAllowanceNegRiskExchangeV2},
+		{v.config.CtfCollateralAdapter, info.PUSDAllowanceCtfAdapter},
+		{v.config.NegRiskCtfCollateralAdapter, info.PUSDAllowanceNegRiskCtfAdapter},
+		{v.config.CollateralOfframp, info.PUSDAllowanceOfframp},
+	}
+	for _, a := range pUSDApprovals {
+		if needsApproval(a.current) {
+			call, err := buildERC20ApproveCall(v.config.CollateralToken, a.spender, maxApproval)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build pUSD approve for %s: %w", a.spender.Hex(), err)
 			}
+			calls = append(calls, call)
+		}
+	}
+
+	ctfApprovals := []struct {
+		operator common.Address
+		approved bool
+	}{
+		{v.config.ExchangeV2, info.CTFApprovedExchangeV2},
+		{v.config.NegRiskExchangeV2, info.CTFApprovedNegRiskExchangeV2},
+		{v.config.CtfCollateralAdapter, info.CTFApprovedCtfCollateralAdapter},
+		{v.config.NegRiskCtfCollateralAdapter, info.CTFApprovedNegRiskCtfCollateralAdapter},
+	}
+	for _, a := range ctfApprovals {
+		if !a.approved {
+			call, err := buildSetApprovalForAllCall(v.config.ConditionalTokens, a.operator, true)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build CTF setApprovalForAll for %s: %w", a.operator.Hex(), err)
+			}
+			calls = append(calls, call)
 		}
 	}
 
@@ -932,10 +954,9 @@ func (v *ContractInterfaceV2) checkTokenWrapStatus(ctx context.Context, asset co
 	opts := &bind.CallOpts{Context: ctx}
 	paused, err := v.collateralOnramp.Paused(opts, asset)
 	if err != nil {
-		// Error querying - assume enabled (optimistic)
 		return true
 	}
-	return !paused // paused=true means disabled, so return !paused
+	return !paused
 }
 
 // checkTokenUnwrapStatus checks if unwrap is paused for the given token.
@@ -944,10 +965,9 @@ func (v *ContractInterfaceV2) checkTokenUnwrapStatus(ctx context.Context, asset 
 	opts := &bind.CallOpts{Context: ctx}
 	paused, err := v.collateralOfframp.Paused(opts, asset)
 	if err != nil {
-		// Error querying - assume enabled (optimistic)
 		return true
 	}
-	return !paused // paused=true means disabled, so return !paused
+	return !paused
 }
 
 // refreshTokenStatus checks wrap/unwrap status for all supported tokens.

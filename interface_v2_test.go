@@ -5,6 +5,7 @@ import (
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/ctf-collateral-adapter"
@@ -12,67 +13,99 @@ import (
 )
 
 func newV2TestInstance(mock *mockTransactionSender) *ContractInterfaceV2 {
-	return &ContractInterfaceV2{
+	v := &ContractInterfaceV2{
 		config: MATIC_CONTRACTS,
 		executor: &txExecutor{
 			txSender: mock,
 		},
+		tokenStatus: map[common.Address]*TokenStatus{},
+		statusTTL:   5 * time.Minute,
+	}
+	now := time.Now()
+	v.tokenStatus[MATIC_CONTRACTS.Collateral] = &TokenStatus{WrapEnabled: true, UnwrapEnabled: true, LastChecked: now}
+	v.tokenStatus[MATIC_CONTRACTS.USDC] = &TokenStatus{WrapEnabled: true, UnwrapEnabled: true, LastChecked: now}
+	return v
+}
+
+func TestV2BuildEnableTradingCalls_CallCount(t *testing.T) {
+	v2 := &ContractInterfaceV2{config: MATIC_CONTRACTS}
+
+	// Zero-value info: all allowances nil/zero, all approvals false → all calls needed
+	info := &V2BalanceInfo{}
+	calls, err := v2.buildEnableTradingCalls(info)
+	if err != nil {
+		t.Fatalf("buildEnableTradingCalls: %v", err)
+	}
+
+	// 1 USDC.e approve + 1 USDC approve + 5 pUSD approves + 4 CTF setApprovalForAll = 11
+	if len(calls) != 11 {
+		t.Fatalf("expected 11 calls with zero allowances, got %d", len(calls))
 	}
 }
 
-func TestV2EnableTradingForEOA_CallCount(t *testing.T) {
-	callIdx := 0
-	hashes := make([]common.Hash, 7)
-	for i := range hashes {
-		hashes[i] = common.BigToHash(big.NewInt(int64(i + 1)))
-	}
-	v2 := &ContractInterfaceV2{
-		config: MATIC_CONTRACTS,
-		executor: &txExecutor{
-			txSender: &sequentialMockSender{hashes: hashes, idx: &callIdx},
-		},
-	}
+func TestV2BuildEnableTradingCalls_Targets(t *testing.T) {
+	v2 := &ContractInterfaceV2{config: MATIC_CONTRACTS}
 
-	result, err := v2.EnableTradingForEOA(context.Background())
+	info := &V2BalanceInfo{}
+	calls, err := v2.buildEnableTradingCalls(info)
 	if err != nil {
-		t.Fatalf("EnableTradingForEOA: %v", err)
+		t.Fatalf("buildEnableTradingCalls: %v", err)
 	}
 
-	if len(result) != 7 {
-		t.Fatalf("expected 7 tx hashes, got %d", len(result))
-	}
-}
-
-func TestV2EnableTradingForEOA_Targets(t *testing.T) {
-	var targets []common.Address
-	v2 := &ContractInterfaceV2{
-		config: MATIC_CONTRACTS,
-		executor: &txExecutor{
-			txSender: &capturingMockSender{targets: &targets},
-		},
+	if len(calls) != 11 {
+		t.Fatalf("expected 11 calls, got %d", len(calls))
 	}
 
-	_, err := v2.EnableTradingForEOA(context.Background())
-	if err != nil {
-		t.Fatalf("EnableTradingForEOA: %v", err)
+	// calls[0]: USDC.e approve → target is Collateral (USDC.e token)
+	if calls[0].Target != MATIC_CONTRACTS.Collateral {
+		t.Errorf("call 0: expected Collateral %s, got %s",
+			MATIC_CONTRACTS.Collateral.Hex(), calls[0].Target.Hex())
 	}
-
-	if len(targets) != 7 {
-		t.Fatalf("expected 7 calls, got %d", len(targets))
+	// calls[1]: USDC approve → target is USDC token
+	if calls[1].Target != MATIC_CONTRACTS.USDC {
+		t.Errorf("call 1: expected USDC %s, got %s",
+			MATIC_CONTRACTS.USDC.Hex(), calls[1].Target.Hex())
 	}
-
-	for i := 0; i < 3; i++ {
-		if targets[i] != MATIC_CONTRACTS.CollateralToken {
+	// calls[2..6]: pUSD approves → target is CollateralToken (pUSD)
+	for i := 2; i < 7; i++ {
+		if calls[i].Target != MATIC_CONTRACTS.CollateralToken {
 			t.Errorf("call %d: expected CollateralToken %s, got %s",
-				i, MATIC_CONTRACTS.CollateralToken.Hex(), targets[i].Hex())
+				i, MATIC_CONTRACTS.CollateralToken.Hex(), calls[i].Target.Hex())
 		}
 	}
-
-	for i := 3; i < 7; i++ {
-		if targets[i] != MATIC_CONTRACTS.ConditionalTokens {
+	// calls[7..10]: CTF setApprovalForAll → target is ConditionalTokens
+	for i := 7; i < 11; i++ {
+		if calls[i].Target != MATIC_CONTRACTS.ConditionalTokens {
 			t.Errorf("call %d: expected ConditionalTokens %s, got %s",
-				i, MATIC_CONTRACTS.ConditionalTokens.Hex(), targets[i].Hex())
+				i, MATIC_CONTRACTS.ConditionalTokens.Hex(), calls[i].Target.Hex())
 		}
+	}
+}
+
+func TestV2BuildEnableTradingCalls_SkipsApproved(t *testing.T) {
+	v2 := &ContractInterfaceV2{config: MATIC_CONTRACTS}
+
+	maxApproval := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	info := &V2BalanceInfo{
+		USDCEAllowanceOnramp:           maxApproval,
+		USDCAllowanceOnramp:            maxApproval,
+		PUSDAllowanceExchangeV2:        maxApproval,
+		PUSDAllowanceNegRiskExchangeV2: maxApproval,
+		PUSDAllowanceCtfAdapter:        maxApproval,
+		PUSDAllowanceNegRiskCtfAdapter: maxApproval,
+		PUSDAllowanceOfframp:           maxApproval,
+		CTFApprovedExchangeV2:                  true,
+		CTFApprovedNegRiskExchangeV2:           true,
+		CTFApprovedCtfCollateralAdapter:        true,
+		CTFApprovedNegRiskCtfCollateralAdapter: true,
+	}
+	calls, err := v2.buildEnableTradingCalls(info)
+	if err != nil {
+		t.Fatalf("buildEnableTradingCalls: %v", err)
+	}
+
+	if len(calls) != 0 {
+		t.Fatalf("expected 0 calls when all approved, got %d", len(calls))
 	}
 }
 
