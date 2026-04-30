@@ -52,6 +52,7 @@ type V2BalanceInfo struct {
 
 	PUSDAllowanceExchangeV2        *big.Int
 	PUSDAllowanceNegRiskExchangeV2 *big.Int
+	PUSDAllowanceNegRiskAdapter    *big.Int // V1 NegRiskAdapter — still required by CLOB V2 for neg-risk markets
 	PUSDAllowanceCtfAdapter        *big.Int
 	PUSDAllowanceNegRiskCtfAdapter *big.Int
 	PUSDAllowanceOfframp           *big.Int
@@ -287,6 +288,10 @@ func (v *ContractInterfaceV2) GetBalancesAtBlock(ctx context.Context, address co
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pUSD allowance for NegRiskExchangeV2: %w", err)
 	}
+	info.PUSDAllowanceNegRiskAdapter, err = v.collateralToken.Allowance(opts, address, v.config.NegRiskAdapter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pUSD allowance for NegRiskAdapter: %w", err)
+	}
 	info.PUSDAllowanceCtfAdapter, err = v.collateralToken.Allowance(opts, address, v.config.CtfCollateralAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get pUSD allowance for CtfCollateralAdapter: %w", err)
@@ -457,6 +462,7 @@ func (v *ContractInterfaceV2) buildEnableTradingCalls(info *V2BalanceInfo) ([]co
 	}{
 		{v.config.ExchangeV2, info.PUSDAllowanceExchangeV2},
 		{v.config.NegRiskExchangeV2, info.PUSDAllowanceNegRiskExchangeV2},
+		{v.config.NegRiskAdapter, info.PUSDAllowanceNegRiskAdapter},
 		{v.config.CtfCollateralAdapter, info.PUSDAllowanceCtfAdapter},
 		{v.config.NegRiskCtfCollateralAdapter, info.PUSDAllowanceNegRiskCtfAdapter},
 		{v.config.CollateralOfframp, info.PUSDAllowanceOfframp},
@@ -1251,6 +1257,9 @@ func (v *ContractInterfaceV2) PrintBalanceAndAllowance(ctx context.Context, addr
 	fmt.Println("Allowances:")
 	fmt.Printf("  USDC → CollateralOnramp: %s\n", checkmark(info.USDCAllowanceOnramp.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  USDC.e → CollateralOnramp: %s\n", checkmark(info.USDCEAllowanceOnramp.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  pUSD → ExchangeV2: %s\n", checkmark(info.PUSDAllowanceExchangeV2.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  pUSD → NegRiskExchangeV2: %s\n", checkmark(info.PUSDAllowanceNegRiskExchangeV2.Cmp(big.NewInt(0)) > 0))
+	fmt.Printf("  pUSD → NegRiskAdapter: %s\n", checkmark(info.PUSDAllowanceNegRiskAdapter.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  pUSD → CtfCollateralAdapter: %s\n", checkmark(info.PUSDAllowanceCtfAdapter.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  pUSD → NegRiskCtfCollateralAdapter: %s\n", checkmark(info.PUSDAllowanceNegRiskCtfAdapter.Cmp(big.NewInt(0)) > 0))
 	fmt.Printf("  pUSD → CollateralOfframp: %s\n", checkmark(info.PUSDAllowanceOfframp.Cmp(big.NewInt(0)) > 0))

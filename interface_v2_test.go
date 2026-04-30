@@ -37,9 +37,9 @@ func TestV2BuildEnableTradingCalls_CallCount(t *testing.T) {
 		t.Fatalf("buildEnableTradingCalls: %v", err)
 	}
 
-	// 1 USDC.e approve + 1 USDC approve + 5 pUSD approves + 4 CTF setApprovalForAll = 11
-	if len(calls) != 11 {
-		t.Fatalf("expected 11 calls with zero allowances, got %d", len(calls))
+	// 1 USDC.e approve + 1 USDC approve + 6 pUSD approves + 4 CTF setApprovalForAll = 12
+	if len(calls) != 12 {
+		t.Fatalf("expected 12 calls with zero allowances, got %d", len(calls))
 	}
 }
 
@@ -52,8 +52,8 @@ func TestV2BuildEnableTradingCalls_Targets(t *testing.T) {
 		t.Fatalf("buildEnableTradingCalls: %v", err)
 	}
 
-	if len(calls) != 11 {
-		t.Fatalf("expected 11 calls, got %d", len(calls))
+	if len(calls) != 12 {
+		t.Fatalf("expected 12 calls, got %d", len(calls))
 	}
 
 	// calls[0]: USDC.e approve → target is Collateral (USDC.e token)
@@ -66,15 +66,15 @@ func TestV2BuildEnableTradingCalls_Targets(t *testing.T) {
 		t.Errorf("call 1: expected USDC %s, got %s",
 			MATIC_CONTRACTS.USDC.Hex(), calls[1].Target.Hex())
 	}
-	// calls[2..6]: pUSD approves → target is CollateralToken (pUSD)
-	for i := 2; i < 7; i++ {
+	// calls[2..7]: pUSD approves → target is CollateralToken (pUSD)
+	for i := 2; i < 8; i++ {
 		if calls[i].Target != MATIC_CONTRACTS.CollateralToken {
 			t.Errorf("call %d: expected CollateralToken %s, got %s",
 				i, MATIC_CONTRACTS.CollateralToken.Hex(), calls[i].Target.Hex())
 		}
 	}
-	// calls[7..10]: CTF setApprovalForAll → target is ConditionalTokens
-	for i := 7; i < 11; i++ {
+	// calls[8..11]: CTF setApprovalForAll → target is ConditionalTokens
+	for i := 8; i < 12; i++ {
 		if calls[i].Target != MATIC_CONTRACTS.ConditionalTokens {
 			t.Errorf("call %d: expected ConditionalTokens %s, got %s",
 				i, MATIC_CONTRACTS.ConditionalTokens.Hex(), calls[i].Target.Hex())
@@ -91,6 +91,7 @@ func TestV2BuildEnableTradingCalls_SkipsApproved(t *testing.T) {
 		USDCAllowanceOnramp:            maxApproval,
 		PUSDAllowanceExchangeV2:        maxApproval,
 		PUSDAllowanceNegRiskExchangeV2: maxApproval,
+		PUSDAllowanceNegRiskAdapter:    maxApproval,
 		PUSDAllowanceCtfAdapter:        maxApproval,
 		PUSDAllowanceNegRiskCtfAdapter: maxApproval,
 		PUSDAllowanceOfframp:           maxApproval,
