@@ -1207,9 +1207,10 @@ func (v *ContractInterfaceV2) ExecuteTransactionBySafeAndSingleSigner(
 		return common.Hash{}, fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// Execute via txSender
-	if v.executor.txSender == nil {
-		return common.Hash{}, fmt.Errorf("txSender not configured")
+	// Execute via txSender — prefer executor's txSender, fall back to safeSigner itself
+	txSender := v.executor.txSender
+	if txSender == nil {
+		txSender = safeSigner
 	}
 
 	safeAbi, err := gnosissafe.GnosisSafeL2MetaData.GetAbi()
@@ -1227,7 +1228,7 @@ func (v *ContractInterfaceV2) ExecuteTransactionBySafeAndSingleSigner(
 		return common.Hash{}, fmt.Errorf("failed to pack execTransaction: %w", err)
 	}
 
-	txHash, err := v.executor.txSender.SendEthereumTransaction(safeAddr, execTxData, big.NewInt(0))
+	txHash, err := txSender.SendEthereumTransaction(safeAddr, execTxData, big.NewInt(0))
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("failed to send Safe transaction: %w", err)
 	}
@@ -1344,7 +1345,11 @@ func (v *ContractInterfaceV2) deploySafeWithSig(chainID *big.Int, safeFactory, p
 		return
 	}
 
-	txHash, err = v.executor.txSender.SendEthereumTransaction(v.config.SafeProxyFactory, createProxyData, big.NewInt(0))
+	txSender := v.executor.txSender
+	if txSender == nil {
+		txSender = safeSigner
+	}
+	txHash, err = txSender.SendEthereumTransaction(v.config.SafeProxyFactory, createProxyData, big.NewInt(0))
 	if err != nil {
 		return
 	}
