@@ -12,7 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	ethclient "github.com/ivanzzeth/ethclient"
 	"github.com/ivanzzeth/ethsig"
-	"github.com/ivanzzeth/polymarket-go-contracts/sender"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/sender"
 )
 
 // GetTransactionSenderBySigner creates a TransactionSender based on the signer type

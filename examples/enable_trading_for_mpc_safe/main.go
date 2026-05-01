@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	polymarketcontracts "github.com/ivanzzeth/polymarket-go-contracts"
-	"github.com/ivanzzeth/polymarket-go-contracts/signer"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/signer"
 )
 
 func main() {

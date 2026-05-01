@@ -8,10 +8,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	conditional_tokens "github.com/ivanzzeth/polymarket-go-contracts/contracts/conditional-tokens"
-	ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/ctf-collateral-adapter"
-	neg_risk_ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-ctf-collateral-adapter"
-	"github.com/ivanzzeth/polymarket-go-contracts/signer"
+	conditional_tokens "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/conditional-tokens"
+	ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/ctf-collateral-adapter"
+	neg_risk_ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/neg-risk-ctf-collateral-adapter"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/signer"
 
 	"github.com/ivanzzeth/ethsig/eip712"
 )

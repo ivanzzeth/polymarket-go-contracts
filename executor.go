@@ -9,8 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ivanzzeth/ethclient"
-	"github.com/ivanzzeth/polymarket-go-contracts/sender"
-	"github.com/ivanzzeth/polymarket-go-contracts/signer"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/sender"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/signer"
 )
 
 type contractCall struct {

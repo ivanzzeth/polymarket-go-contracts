@@ -7,7 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ivanzzeth/ethsig/eip712"
-	"github.com/ivanzzeth/polymarket-go-contracts/signer"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/signer"
 )
 
 // mockTransactionSender captures args for verification.

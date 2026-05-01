@@ -7,13 +7,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
-	collateral_offramp "github.com/ivanzzeth/polymarket-go-contracts/contracts/collateral-offramp"
-	collateral_onramp "github.com/ivanzzeth/polymarket-go-contracts/contracts/collateral-onramp"
-	conditional_tokens "github.com/ivanzzeth/polymarket-go-contracts/contracts/conditional-tokens"
-	ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/ctf-collateral-adapter"
-	"github.com/ivanzzeth/polymarket-go-contracts/contracts/erc20"
-	negriskadapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-adapter"
-	neg_risk_ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/contracts/neg-risk-ctf-collateral-adapter"
+	collateral_offramp "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/collateral-offramp"
+	collateral_onramp "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/collateral-onramp"
+	conditional_tokens "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/conditional-tokens"
+	ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/ctf-collateral-adapter"
+	"github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/erc20"
+	negriskadapter "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/neg-risk-adapter"
+	neg_risk_ctf_collateral_adapter "github.com/ivanzzeth/polymarket-go-contracts/v2/contracts/neg-risk-ctf-collateral-adapter"
 )
 
 // V1 calldata builders — regular markets (CTF direct)
